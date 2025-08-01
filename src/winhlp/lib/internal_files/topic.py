@@ -641,6 +641,7 @@ class TopicFile(InternalFile):
     parsed_topics: List[ParsedTopic] = []
     topic_offset: int = 0  # Track TOPICOFFSET for hyperlink resolution
     topic_offset_map: dict = {}  # Maps topic offsets to topic numbers
+    remaining_linkdata1: bytes = b""  # LinkData1 remaining after ParagraphInfo parsing
 
     def __init__(self, system_file: Any = None, **data):
         super().__init__(**data)
@@ -920,9 +921,9 @@ class TopicFile(InternalFile):
             link.text_content = self._decode_text(
                 self._parse_link_data2(link_data2, link.data_len2, link.block_size, link.data_len1)
             )
-            # Parse the text content into structured spans
-            text_spans, hotspot_mappings = self._parse_text_content(
-                link_data2, link.data_len2, link.block_size, link.data_len1
+            # Parse the text content using proper interleaved LinkData1/LinkData2 parsing
+            text_spans, hotspot_mappings = self._parse_topic_content_interleaved(
+                self.remaining_linkdata1, link_data2, link.data_len2, link.block_size, link.data_len1
             )
             self._add_content_to_current_topic(text_spans, paragraph_info, hotspot_mappings)
         elif link.record_type == 0x01:  # TL_DISPLAY30 (Windows 3.0)
@@ -930,6 +931,8 @@ class TopicFile(InternalFile):
             link.text_content = self._decode_text(
                 self._parse_link_data2(link_data2, link.data_len2, link.block_size, link.data_len1)
             )
+            # For Windows 3.0, use the old parsing method for now
+            # TODO: Implement Windows 3.0 specific interleaved parsing if needed
             text_spans, hotspot_mappings = self._parse_text_content(
                 link_data2, link.data_len2, link.block_size, link.data_len1
             )
@@ -1068,10 +1071,15 @@ class TopicFile(InternalFile):
     def _parse_formatting_commands(self, data: bytes):
         """
         Parses the formatting commands that follow ParagraphInfo.
+        Note: This may be incorrectly parsing LinkData1 as sequential commands.
+        The C code suggests formatting commands should be interleaved with text.
         """
         # Guard against invalid data
         if not data or len(data) == 0:
             return
+
+        # DEBUG: Could log first few bytes here if needed for debugging
+        # hex_preview = data[:min(16, len(data))].hex()
 
         offset = 0
         while offset < len(data):
@@ -1081,7 +1089,47 @@ class TopicFile(InternalFile):
             command_byte = struct.unpack_from("<B", data, offset)[0]
             offset += 1
 
-            if command_byte == 0x02:  # JumpCommand
+            # Basic formatting commands (from C reference code)
+            if command_byte == 0x20:  # vfld MVB
+                if offset + 4 > len(data):
+                    break
+                _ = struct.unpack_from("<l", data, offset)[0]  # vfld_number - MVB specific, unused
+                offset += 4
+                # Skip for now - MVB specific
+                continue
+            elif command_byte == 0x21:  # dtype MVB
+                if offset + 2 > len(data):
+                    break
+                _ = struct.unpack_from("<h", data, offset)[0]  # dtype_number - MVB specific, unused
+                offset += 2
+                # Skip for now - MVB specific
+                continue
+            elif command_byte == 0x80:  # Font change
+                if offset + 2 > len(data):
+                    break
+                font_number = struct.unpack_from("<h", data, offset)[0]
+                offset += 2
+                # TODO: Handle font change
+                continue
+            elif command_byte == 0x81:  # Line break
+                # TODO: Handle line break
+                continue
+            elif command_byte == 0x82:  # End of paragraph
+                # TODO: Handle end of paragraph
+                continue
+            elif command_byte == 0x83:  # TAB
+                # TODO: Handle tab
+                continue
+            elif command_byte == 0x89:  # End of hotspot
+                # TODO: Handle end of hotspot
+                continue
+            elif command_byte == 0x8B:  # Non-break space
+                # TODO: Handle non-break space
+                continue
+            elif command_byte == 0x8C:  # Non-break hyphen
+                # TODO: Handle non-break hyphen
+                continue
+            elif command_byte == 0x02:  # JumpCommand
                 if offset + 4 > len(data):
                     break
                 topic_offset = struct.unpack_from("<l", data, offset)[0]
@@ -1541,6 +1589,35 @@ class TopicFile(InternalFile):
                 self.formatting_commands.append(command)
             elif command_byte == 0x00:  # End of commands
                 break
+            elif command_byte == 0xFF:  # End of character formatting
+                break
+            elif command_byte in [0x86, 0x87, 0x88]:  # Embedded/bitmap commands
+                if offset + 2 > len(data):
+                    break
+                _ = struct.unpack_from("<B", data, offset)[0]  # embed_type - unused in old parser
+                offset += 1
+                # Skip complex parsing - implemented in interleaved parser instead
+                continue
+            elif command_byte in [0xC8, 0xCC]:  # Macro commands
+                if offset + 2 > len(data):
+                    break
+                macro_length = struct.unpack_from("<h", data, offset)[0]
+                offset += 2
+                if offset + macro_length > len(data):
+                    break
+                # Skip macro data
+                offset += macro_length
+                continue
+            elif command_byte in [0xE0, 0xE1, 0xE2, 0xE3, 0xE6, 0xE7]:  # Jump commands HC30/HC31
+                if offset + 4 > len(data):
+                    break
+                topic_offset = struct.unpack_from("<l", data, offset)[0]
+                offset += 4
+                # TODO: Handle jump commands
+                continue
+            elif command_byte in [0xEA, 0xEB, 0xEE, 0xEF]:  # External jump commands
+                # These are already handled above in the existing code
+                pass
             else:
                 # Unknown command byte - create diagnostic exception like topic parsing
                 raise NotImplementedError(
@@ -1662,7 +1739,219 @@ class TopicFile(InternalFile):
 
         # Now parse the formatting commands that follow ParagraphInfo
         self.formatting_commands.append(paragraph_info)
-        self._parse_formatting_commands(data[offset:])
+
+        # Store the remaining LinkData1 after ParagraphInfo for interleaved parsing
+        self.remaining_linkdata1 = data[offset:] if offset < len(data) else b""
+
+    def _parse_topic_content_interleaved(
+        self, linkdata1: bytes, linkdata2: bytes, data_len2: int, block_size: int, data_len1: int
+    ) -> tuple[List[TextSpan], List[HotspotMapping]]:
+        """
+        Parse topic content by properly interleaving LinkData1 (formatting commands)
+        and LinkData2 (text strings) according to the Windows Help file format.
+
+        Based on helldeco.c implementation and documentation:
+        1. Read null-terminated string from LinkData2 (with phrase decompression)
+        2. Read formatting command from LinkData1
+        3. Apply formatting to next string
+        4. Repeat until 0xFF (end of formatting) or end of data
+        """
+        text_spans = []
+        hotspot_mappings = []
+
+        # Get decompressed LinkData2
+        raw_linkdata2 = self._parse_link_data2(linkdata2, data_len2, block_size, data_len1)
+
+        # Initialize pointers for both data streams
+        linkdata1_ptr = 0
+        linkdata2_ptr = 0
+
+        # Current text accumulation and formatting state
+        current_text_bytes = bytearray()
+        current_font = None
+        current_formatting = {
+            "bold": False,
+            "italic": False,
+            "underline": False,
+            "strikethrough": False,
+            "superscript": False,
+            "subscript": False,
+            "hyperlink": False,
+            "hyperlink_target": None,
+            "embedded_image": None,
+        }
+
+        # Hotspot tracking
+        hotspot_active = False
+        hotspot_start_position = 0
+        total_text_position = 0
+
+        def finish_current_span():
+            """Helper to finish current text span and create new one."""
+            nonlocal current_text_bytes, total_text_position, hotspot_active, hotspot_start_position
+            if current_text_bytes:
+                current_text = self._decode_text(bytes(current_text_bytes))
+                span_index = len(text_spans)
+
+                # Create hotspot mapping if in hotspot
+                if hotspot_active and current_formatting["hyperlink"] and current_formatting["hyperlink_target"]:
+                    hotspot_type = "jump"
+                    target = current_formatting["hyperlink_target"]
+
+                    if target.startswith("popup:"):
+                        hotspot_type = "popup"
+                    elif target.startswith("macro:"):
+                        hotspot_type = "macro"
+
+                    hotspot_mapping = HotspotMapping(
+                        text_span_index=span_index,
+                        hotspot_type=hotspot_type,
+                        target=target,
+                        display_text=current_text,
+                        start_position=hotspot_start_position,
+                        end_position=total_text_position + len(current_text),
+                        raw_data={"type": "hotspot", "target": target, "hotspot_type": hotspot_type},
+                    )
+                    hotspot_mappings.append(hotspot_mapping)
+
+                # Create text span
+                text_span = TextSpan(
+                    text=current_text,
+                    font_number=current_font,
+                    is_bold=current_formatting["bold"],
+                    is_italic=current_formatting["italic"],
+                    is_underline=current_formatting["underline"],
+                    is_strikethrough=current_formatting["strikethrough"],
+                    is_superscript=current_formatting["superscript"],
+                    is_subscript=current_formatting["subscript"],
+                    is_hyperlink=current_formatting["hyperlink"],
+                    hyperlink_target=current_formatting["hyperlink_target"],
+                    embedded_image=current_formatting["embedded_image"],
+                    raw_data={"type": "text", "span_index": span_index},
+                )
+                text_spans.append(text_span)
+                total_text_position += len(current_text)
+                current_text_bytes.clear()
+
+        # Main interleaved parsing loop
+        while linkdata2_ptr < len(raw_linkdata2) and linkdata1_ptr < len(linkdata1):
+            # 1. Read null-terminated string from LinkData2
+            string_start = linkdata2_ptr
+            while linkdata2_ptr < len(raw_linkdata2) and raw_linkdata2[linkdata2_ptr] != 0x00:
+                linkdata2_ptr += 1
+
+            # Add string to current text (even if empty)
+            if string_start < linkdata2_ptr:
+                current_text_bytes.extend(raw_linkdata2[string_start:linkdata2_ptr])
+
+            # Skip null terminator
+            if linkdata2_ptr < len(raw_linkdata2):
+                linkdata2_ptr += 1
+
+            # 2. Read formatting command from LinkData1 (if available)
+            if linkdata1_ptr < len(linkdata1):
+                command_byte = linkdata1[linkdata1_ptr]
+                linkdata1_ptr += 1
+
+                if command_byte == 0xFF:  # End of character formatting
+                    break
+                elif command_byte == 0x00:  # End of commands
+                    break
+                elif command_byte == 0x80:  # Font change
+                    if linkdata1_ptr + 1 < len(linkdata1):
+                        finish_current_span()
+                        current_font = struct.unpack_from("<h", linkdata1, linkdata1_ptr)[0]
+                        linkdata1_ptr += 2
+                elif command_byte == 0x81:  # Line break
+                    finish_current_span()
+                    current_text_bytes.extend(b"\n")
+                elif command_byte == 0x82:  # End of paragraph
+                    finish_current_span()
+                    current_text_bytes.extend(b"\n\n")
+                elif command_byte == 0x83:  # TAB
+                    finish_current_span()
+                    current_text_bytes.extend(b"\t")
+                elif command_byte == 0x89:  # End of hotspot
+                    finish_current_span()
+                    current_formatting["hyperlink"] = False
+                    current_formatting["hyperlink_target"] = None
+                    hotspot_active = False
+                elif command_byte == 0x8B:  # Non-break space
+                    finish_current_span()
+                    current_text_bytes.extend(b" ")
+                elif command_byte == 0x8C:  # Non-break hyphen
+                    finish_current_span()
+                    current_text_bytes.extend(b"-")
+                elif command_byte in [0x86, 0x87, 0x88]:  # Embedded/bitmap commands
+                    if linkdata1_ptr < len(linkdata1):
+                        finish_current_span()
+                        embed_type = linkdata1[linkdata1_ptr]
+                        linkdata1_ptr += 1
+
+                        # Read compressed picture size
+                        picture_size, linkdata1_ptr = self.scan_long(linkdata1, linkdata1_ptr)
+
+                        # If type is 0x22 (HC31), read number of hotspots
+                        if embed_type == 0x22 and linkdata1_ptr + 2 <= len(linkdata1):
+                            num_hotspots, linkdata1_ptr = self.scan_word(linkdata1, linkdata1_ptr)
+                            # TODO: Track hotspot count for topic offset calculation
+
+                        # Skip picture data for now
+                        linkdata1_ptr += picture_size
+
+                        # Store embedded image info
+                        alignment = {0x86: "center", 0x87: "left", 0x88: "right"}[command_byte]
+                        current_formatting["embedded_image"] = f"bitmap:{alignment}"
+                elif command_byte in [0xE0, 0xE1, 0xE2, 0xE3, 0xE6, 0xE7]:  # Jump commands
+                    if linkdata1_ptr + 4 <= len(linkdata1):
+                        finish_current_span()
+                        topic_offset = struct.unpack_from("<L", linkdata1, linkdata1_ptr)[0]
+                        linkdata1_ptr += 4
+
+                        # Set hyperlink formatting based on command type
+                        is_popup = command_byte in [0xE0, 0xE2, 0xE6]
+                        no_font_change = command_byte in [0xE6, 0xE7]
+
+                        # TODO: Implement no_font_change behavior - preserve current font instead of changing
+
+                        current_formatting["hyperlink"] = True
+                        if is_popup:
+                            current_formatting["hyperlink_target"] = f"popup:{topic_offset:08X}"
+                        else:
+                            current_formatting["hyperlink_target"] = f"topic:{topic_offset:08X}"
+
+                        # Track hotspot state
+                        hotspot_active = True
+                        hotspot_start_position = total_text_position
+                elif command_byte in [0xC8, 0xCC]:  # Macro commands
+                    if linkdata1_ptr + 2 <= len(linkdata1):
+                        finish_current_span()
+                        macro_length = struct.unpack_from("<h", linkdata1, linkdata1_ptr)[0]
+                        linkdata1_ptr += 2
+
+                        if linkdata1_ptr + macro_length <= len(linkdata1):
+                            # Extract macro string
+                            macro_string = linkdata1[linkdata1_ptr : linkdata1_ptr + macro_length].decode(
+                                "cp1252", errors="replace"
+                            )
+                            linkdata1_ptr += macro_length
+
+                            # Set hyperlink for macro
+                            current_formatting["hyperlink"] = True
+                            current_formatting["hyperlink_target"] = f"macro:{macro_string}"
+                            hotspot_active = True
+                            hotspot_start_position = total_text_position
+                elif command_byte in [0xEA, 0xEB, 0xEE, 0xEF]:  # External jump commands
+                    # These are more complex - skip for now
+                    if linkdata1_ptr + 2 <= len(linkdata1):
+                        data_length = struct.unpack_from("<h", linkdata1, linkdata1_ptr)[0]
+                        linkdata1_ptr += 2 + data_length
+                # For unknown commands, skip to avoid errors
+
+        # Finish any remaining text
+        finish_current_span()
+
+        return text_spans, hotspot_mappings
 
     def _decode_text(self, data: bytes) -> str:
         """
@@ -2089,6 +2378,8 @@ class TopicFile(InternalFile):
                 formatting_flags = struct.unpack_from("<H", link_data1, link_data1_ptr + 2)[0]
                 cell_id = struct.unpack_from("<B", link_data1, link_data1_ptr + 4)[0] - 0x80
                 link_data1_ptr += 5
+
+                # TODO: Use column_number, formatting_flags, and cell_id for proper table cell formatting
             else:
                 break
 
@@ -2121,6 +2412,8 @@ class TopicFile(InternalFile):
                         border_info = link_data1[link_data1_ptr]
                         link_data1_ptr += 1
                         border_width, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
+
+                        # TODO: Use border_info and border_width for table cell border formatting
                 if para_bits & 0x0200:  # tab info
                     tab_count, link_data1_ptr = self.scan_word(link_data1, link_data1_ptr)
                     for _ in range(tab_count):

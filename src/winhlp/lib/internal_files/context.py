@@ -439,7 +439,6 @@ class ContextFile(InternalFile):
         # Try to build a string by working backwards from the hash
         while remaining > 1 and len(buffer) < 14:  # Max context length
             # Find a character that could contribute to this hash
-            found = False
             for i, char in enumerate(untable):
                 if char and char != 0:
                     # Test if this character could be part of the hash

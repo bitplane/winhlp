@@ -156,7 +156,7 @@ class PhrIndexFile(InternalFile):
         phrase_offsets = [0]  # PhraseOffsets[0] = offset; (offset starts at 0)
         offset = 0
 
-        for l in range(self.header.entries):
+        for entry_index in range(self.header.entries):
             # Exact algorithm from helldeco.c:
             # for (n = 1; GetBit(HelpFile); n += 1 << PhrIndexHdr.bits);
             n = 1
