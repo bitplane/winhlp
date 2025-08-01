@@ -152,11 +152,13 @@ class FontFile(InternalFile):
     descriptors: list = []
     styles: list = []
     charmaps: list = []
+    parsed_charmaps: dict = {}
     system_file: Any = None
 
     def __init__(self, system_file: Any = None, **data):
         super().__init__(**data)
         self.system_file = system_file
+        self.parsed_charmaps = {}
         self._parse()
 
     def _parse(self):
@@ -465,6 +467,120 @@ class FontFile(InternalFile):
                 break
             self.charmaps.append(self.raw_data[offset:end_of_string].decode("ascii", errors="ignore"))
             offset = end_of_string + 1
-        # TODO: Implement parsing of actual *.tbl files (CharMapHeader and CharMapEntry).
-        # The C code in `helpdeco.c` (FontLoad function) reads and processes these files.
-        # This will likely involve creating a new internal file parser for .tbl files.
+        # Parse .tbl files referenced in charmaps
+        # Based on helpdeco.c FontLoad function
+        for charmap in self.charmaps:
+            if not charmap or charmap == "|MVCHARTAB,0":
+                continue
+
+            # Extract the charmap name (before the comma)
+            charmap_name = charmap.split(",")[0] if "," in charmap else charmap
+
+            # Try to find this charmap as an internal file in the help file
+            if self.parent_hlp and hasattr(self.parent_hlp, "directory"):
+                charmap_data = self._get_internal_file_data(charmap_name)
+                if charmap_data:
+                    self._parse_charmap_file(charmap_name, charmap_data)
+
+    def _get_internal_file_data(self, filename: str) -> Optional[bytes]:
+        """
+        Get the raw data for an internal file from the help file directory.
+        """
+        if not self.parent_hlp or not hasattr(self.parent_hlp, "directory"):
+            return None
+
+        # Search for the filename in the directory
+        for entry in self.parent_hlp.directory.entries:
+            if entry.filename == filename:
+                # Calculate file offset and read the data
+                file_offset = entry.file_offset
+                if file_offset < len(self.parent_hlp.raw_data):
+                    # Read FILEHEADER to get the actual size
+                    header_data = self.parent_hlp.raw_data[file_offset : file_offset + 9]
+                    if len(header_data) >= 9:
+                        reserved_space, used_space, file_flags = struct.unpack("<LLB", header_data)
+                        file_data_start = file_offset + 9
+                        file_data_end = file_data_start + used_space
+                        if file_data_end <= len(self.parent_hlp.raw_data):
+                            return self.parent_hlp.raw_data[file_data_start:file_data_end]
+        return None
+
+    def _parse_charmap_file(self, filename: str, data: bytes):
+        """
+        Parse a character mapping .tbl file according to CHARMAPHEADER structure.
+        Based on helpdeco.c FontLoad function.
+        """
+        if len(data) < 40:  # CHARMAPHEADER size (7 + 13 uint16s)
+            return
+
+        # Parse CHARMAPHEADER
+        offset = 0
+        magic, size, unknown1, unknown2, entries, ligatures, lig_len = struct.unpack_from("<HHHHHHH", data, offset)
+        offset += 14
+
+        unknown_fields = []
+        for i in range(13):
+            unknown_fields.append(struct.unpack_from("<H", data, offset)[0])
+            offset += 2
+
+        charmap_header = CharMapHeader(
+            magic=magic,
+            size=size,
+            unknown1=unknown1,
+            unknown2=unknown2,
+            entries=entries,
+            ligatures=ligatures,
+            lig_len=lig_len,
+            unknown=unknown_fields,
+            raw_data={
+                "raw": data[:offset],
+                "parsed": {
+                    "magic": magic,
+                    "size": size,
+                    "unknown1": unknown1,
+                    "unknown2": unknown2,
+                    "entries": entries,
+                    "ligatures": ligatures,
+                    "lig_len": lig_len,
+                    "unknown": unknown_fields,
+                },
+            },
+        )
+
+        # Parse character mapping entries
+        charmap_entries = []
+        for i in range(entries):
+            if offset + 10 > len(data):  # Each entry is 10 bytes (6 bytes + 2 padding)
+                break
+
+            char_class, order, normal, clipboard, mac, mac_clipboard = struct.unpack_from("<HHBBBB", data, offset)
+            offset += 6
+            unused = struct.unpack_from("<H", data, offset)[0]  # padding/unused
+            offset += 2
+
+            entry_raw_data = data[offset - 10 : offset]
+            entry = CharMapEntry(
+                char_class=char_class,
+                order=order,
+                normal=normal,
+                clipboard=clipboard,
+                mac=mac,
+                mac_clipboard=mac_clipboard,
+                unused=unused,
+                raw_data={
+                    "raw": entry_raw_data,
+                    "parsed": {
+                        "char_class": char_class,
+                        "order": order,
+                        "normal": normal,
+                        "clipboard": clipboard,
+                        "mac": mac,
+                        "mac_clipboard": mac_clipboard,
+                        "unused": unused,
+                    },
+                },
+            )
+            charmap_entries.append(entry)
+
+        # Store the parsed charmap data
+        self.parsed_charmaps[filename] = {"header": charmap_header, "entries": charmap_entries}

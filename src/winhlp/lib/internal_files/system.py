@@ -176,9 +176,7 @@ class SystemFile(InternalFile):
             elif record_type == 5:  # ICON
                 self._parse_icon(record_data)
             elif record_type == 6:  # WINDOW
-                # TODO: Implement detailed parsing for SECWINDOW and MVBWINDOW structures.
-                # This is complex, depends on WinHelp version (3.1 vs Viewer 2.0)
-                parsed_data = {"window_data": data_bytes.hex()}
+                self._parse_window(record_data)
             elif record_type == 8:  # CITATION
                 self._parse_citation(record_data)
             elif record_type == 9:  # LCID (Locale ID)
@@ -192,9 +190,6 @@ class SystemFile(InternalFile):
             elif record_type == 13:  # GROUPS
                 self._parse_groups(record_data)
             elif record_type == 14:  # KeyIndex
-                # TODO: Implement conditional parsing for RecordType 14.
-                # It can be either INDEX_SEPARATORS (string) or KEYINDEX (struct),
-                # depending on whether it's a multimedia file (check self.parent_hlp.system.multi).
                 self._parse_key_index(record_data)
             elif record_type == 19:  # DLLMAPS
                 self._parse_dllmaps(record_data)
@@ -293,27 +288,38 @@ class SystemFile(InternalFile):
 
     def _parse_key_index(self, data: bytes):
         """
-        Parses a KeyIndex record.
+        Parses a KeyIndex record (record type 14).
+
+        Can be either INDEX_SEPARATORS (string) or KEYINDEX (struct)
+        depending on whether it's a multimedia file.
         """
-        if len(data) >= 110:
+        # Check if it's likely a KEYINDEX struct (110 bytes) or INDEX_SEPARATORS (string)
+        if len(data) == 110:
+            # KEYINDEX structure format from helldeco.h:
+            # char btreename[10], mapname[10], dataname[10], title[80]
             btree_name = data[0:10].decode("ascii", errors="ignore").split("\x00")[0]
             map_name = data[10:20].decode("ascii", errors="ignore").split("\x00")[0]
             data_name = data[20:30].decode("ascii", errors="ignore").split("\x00")[0]
             title = data[30:110].decode("ascii", errors="ignore").split("\x00")[0]
-        else:
-            # Handle truncated KeyIndex record - extract what we can and pad to correct field sizes
-            btree_name = data[:10].decode("ascii", errors="ignore").split("\x00")[0] if len(data) >= 10 else ""
-            map_name = data[10:20].decode("ascii", errors="ignore").split("\x00")[0] if len(data) >= 20 else ""
-            data_name = data[20:30].decode("ascii", errors="ignore").split("\x00")[0] if len(data) >= 30 else ""
-            title = data[30:110].decode("ascii", errors="ignore").split("\x00")[0] if len(data) >= 110 else ""
 
-        parsed_record = {
-            "btree_name": btree_name,
-            "map_name": map_name,
-            "data_name": data_name,
-            "title": title,
-        }
-        self.records.append(KeyIndex(**parsed_record, raw_data={"raw": data, "parsed": parsed_record}))
+            parsed_record = {
+                "format": "KEYINDEX",
+                "btree_name": btree_name,
+                "map_name": map_name,
+                "data_name": data_name,
+                "title": title,
+            }
+        else:
+            # INDEX_SEPARATORS - null-terminated string of separator characters
+            separators = self._decode_text(data.split(b"\x00")[0])
+            parsed_record = {
+                "format": "INDEX_SEPARATORS",
+                "separators": separators,
+            }
+
+        self.records.append(
+            {"type": "KEYINDEX", "key_index_info": parsed_record, "raw_data": {"raw": data, "parsed": parsed_record}}
+        )
 
     def _parse_def_font(self, data: bytes):
         """
@@ -466,6 +472,141 @@ class SystemFile(InternalFile):
         self.icon = data
         parsed_record = {"icon_size": len(data)}
         self.records.append({"type": "ICON", "icon_data": data, "raw_data": {"raw": data, "parsed": parsed_record}})
+
+    def _parse_window(self, data: bytes):
+        """Parses a WINDOW record (record type 6)."""
+        # Determine window type based on data size
+        # SECWINDOW = 89 bytes, MVBWINDOW = 90 bytes (has extra MoreFlags byte)
+        if len(data) == 89:
+            self._parse_secwindow(data)
+        elif len(data) == 90:
+            self._parse_mvbwindow(data)
+        else:
+            # Unknown window format, store as raw data
+            parsed_record = {"window_type": "unknown", "size": len(data)}
+            self.records.append(
+                {"type": "WINDOW", "window_data": data, "raw_data": {"raw": data, "parsed": parsed_record}}
+            )
+
+    def _parse_secwindow(self, data: bytes):
+        """Parse SECWINDOW structure (WinHelp 3.1)."""
+        offset = 0
+
+        flags = struct.unpack_from("<H", data, offset)[0]
+        offset += 2
+
+        type_str = data[offset : offset + 10].rstrip(b"\x00").decode("latin-1", errors="replace")
+        offset += 10
+
+        name = data[offset : offset + 9].rstrip(b"\x00").decode("latin-1", errors="replace")
+        offset += 9
+
+        caption = data[offset : offset + 51].rstrip(b"\x00").decode("latin-1", errors="replace")
+        offset += 51
+
+        x, y, width, height, maximize = struct.unpack_from("<hhhhh", data, offset)
+        offset += 10
+
+        rgb, unknown1, rgb_nsr = struct.unpack_from("<LHL", data, offset)
+        offset += 10
+
+        unknown2 = 0
+        if flags & 0x800:
+            unknown2 = struct.unpack_from("<H", data, offset)[0]
+            offset += 2
+
+        parsed_record = {
+            "window_type": "SECWINDOW",
+            "flags": flags,
+            "type": type_str,
+            "name": name,
+            "caption": caption,
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "maximize": maximize,
+            "rgb": rgb,
+            "unknown1": unknown1,
+            "rgb_nsr": rgb_nsr,
+            "unknown2": unknown2,
+        }
+
+        self.records.append(
+            {"type": "WINDOW", "window_info": parsed_record, "raw_data": {"raw": data, "parsed": parsed_record}}
+        )
+
+    def _parse_mvbwindow(self, data: bytes):
+        """Parse MVBWINDOW structure (Multimedia Viewer 2.0)."""
+        # MVBWINDOW structure is actually much larger (132 bytes) than what we typically see
+        # Most files seem to have truncated or different structures, so handle gracefully
+        offset = 0
+
+        if len(data) < 73:  # Minimum required for basic fields
+            # Store as unknown window format
+            parsed_record = {"window_type": "unknown_mvb", "size": len(data)}
+            self.records.append(
+                {"type": "WINDOW", "window_data": data, "raw_data": {"raw": data, "parsed": parsed_record}}
+            )
+            return
+
+        flags = struct.unpack_from("<H", data, offset)[0]
+        offset += 2
+
+        type_str = data[offset : offset + 10].rstrip(b"\x00").decode("latin-1", errors="replace")
+        offset += 10
+
+        name = data[offset : offset + 9].rstrip(b"\x00").decode("latin-1", errors="replace")
+        offset += 9
+
+        caption = data[offset : offset + 51].rstrip(b"\x00").decode("latin-1", errors="replace")
+        offset += 51
+
+        more_flags = data[offset] if offset < len(data) else 0
+        offset += 1
+
+        # Parse remaining fields if available
+        x = y = width = height = maximize = 0
+        if offset + 10 <= len(data):
+            x, y, width, height, maximize = struct.unpack_from("<hhhhh", data, offset)
+            offset += 10
+
+        # Parse color fields if available (simplified - just extract what we can)
+        rgb = unknown1 = rgb_nsr = unknown2 = 0
+        if offset + 4 <= len(data):
+            rgb = struct.unpack_from("<L", data, offset)[0]
+            offset += 4
+        if offset + 2 <= len(data):
+            unknown1 = struct.unpack_from("<H", data, offset)[0]
+            offset += 2
+        if offset + 4 <= len(data):
+            rgb_nsr = struct.unpack_from("<L", data, offset)[0]
+            offset += 4
+        if offset + 2 <= len(data):
+            unknown2 = struct.unpack_from("<H", data, offset)[0]
+            offset += 2
+
+        parsed_record = {
+            "window_type": "MVBWINDOW",
+            "flags": flags,
+            "type": type_str,
+            "name": name,
+            "caption": caption,
+            "more_flags": more_flags,
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "maximize": maximize,
+            "rgb": rgb,
+            "unknown1": unknown1,
+            "rgb_nsr": rgb_nsr,
+            "unknown2": unknown2,
+        }
+
+        self.records.append(
+            {"type": "WINDOW", "window_info": parsed_record, "raw_data": {"raw": data, "parsed": parsed_record}}
+        )
 
     def _parse_cnt(self, data: bytes):
         """Parses a CNT record (record type 10)."""

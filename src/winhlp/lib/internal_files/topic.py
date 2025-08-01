@@ -316,9 +316,11 @@ class TopicJumpNoFontCommand(BaseModel):
 class ExternalPopupJumpCommand(BaseModel):
     """0xEA/0xEE - Popup jump into external file"""
 
-    external_file: str
-    window_name: str
-    context_name: str
+    type_field: int  # 0, 1, 4 or 6
+    topic_offset: int
+    window_number: Optional[int] = None  # only if Type = 1
+    external_file: str = ""  # only if Type = 4 or 6
+    window_name: str = ""  # only if Type = 6
     no_font_change: bool = False
     raw_data: dict
 
@@ -326,9 +328,11 @@ class ExternalPopupJumpCommand(BaseModel):
 class ExternalTopicJumpCommand(BaseModel):
     """0xEB/0xEF - Topic jump into external file / secondary window"""
 
-    external_file: str
-    window_name: str
-    context_name: str
+    type_field: int  # 0, 1, 4 or 6
+    topic_offset: int
+    window_number: Optional[int] = None  # only if Type = 1
+    external_file: str = ""  # only if Type = 4 or 6
+    window_name: str = ""  # only if Type = 6
     no_font_change: bool = False
     raw_data: dict
 
@@ -792,7 +796,11 @@ class TopicFile(InternalFile):
             if before31:
                 topic_block_size = 2048
             else:
-                topic_block_size = 4096
+                # TopicBlockSize based on system file header flags (following helldeco.c SysLoad)
+                if self.system_file and self.system_file.header.flags == 8:
+                    topic_block_size = 2048
+                else:
+                    topic_block_size = 4096
 
             block_data_size = topic_block_size - 12  # Subtract header size
             block_data_raw = self.raw_data[offset + 12 : offset + 12 + block_data_size]
@@ -1030,6 +1038,8 @@ class TopicFile(InternalFile):
         - If |PhrIndex and |PhrImage exist: use Hall compression
         """
         # Following helpdeco.c: if (Length <= NumBytes) /* no phrase compression */
+        # DataLen2 handling follows C code - if DataLen2 < BlockSize - DataLen1,
+        # remaining bytes are unused but must be read from |TOPIC file.
         if data_len2 <= block_size - data_len1:
             # No phrase compression - data is stored uncompressed
             return data[:data_len2]
@@ -1071,17 +1081,7 @@ class TopicFile(InternalFile):
             command_byte = struct.unpack_from("<B", data, offset)[0]
             offset += 1
 
-            if command_byte == 0x01:  # TextFormatCommand
-                if offset + 1 > len(data):
-                    break
-                font_number = struct.unpack_from("<B", data, offset)[0]
-                offset += 1
-                command = TextFormatCommand(
-                    font_number=font_number,
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {"font_number": font_number}},
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x02:  # JumpCommand
+            if command_byte == 0x02:  # JumpCommand
                 if offset + 4 > len(data):
                     break
                 topic_offset = struct.unpack_from("<l", data, offset)[0]
@@ -1441,9 +1441,7 @@ class TopicFile(InternalFile):
                     },
                 )
                 self.formatting_commands.append(command)
-            # TODO: Re-implement parsing of external jump commands (0xEA, 0xEB, 0xEE, 0xEF)
-            # to match the helpfile.md struct and the C code's handling of Type and subsequent fields.
-            elif command_byte in [0xEA, 0xEE]:  # ExternalPopupJumpCommand
+            elif command_byte in [0xEA, 0xEB, 0xEE, 0xEF]:  # External jump commands
                 if offset + 2 > len(data):
                     break
                 data_length = struct.unpack_from("<H", data, offset)[0]
@@ -1451,107 +1449,95 @@ class TopicFile(InternalFile):
                 if offset + data_length > len(data):
                     break
 
-                # Parse external file data following helldeco.c structure
                 data_start = offset
 
-                # Read context name (null-terminated)
-                context_name_start = offset
-                while offset < data_start + data_length and data[offset] != 0x00:
-                    offset += 1
-                if offset >= data_start + data_length:
-                    break
-                context_name = self._decode_text(data[context_name_start:offset])
-                offset += 1  # skip null terminator
+                # Parse the structure according to helpfile.md:
+                # unsigned char Type (0, 1, 4 or 6)
+                # TOPICOFFSET TopicOffset
+                # unsigned char WindowNumber (only if Type = 1)
+                # STRINGZ NameOfExternalFile (only if Type = 4 or 6)
+                # STRINGZ WindowName (only if Type = 6)
 
-                # Read external file name (null-terminated)
-                external_file_start = offset
-                while offset < data_start + data_length and data[offset] != 0x00:
-                    offset += 1
-                if offset >= data_start + data_length:
+                if offset >= len(data):
                     break
-                external_file = self._decode_text(data[external_file_start:offset])
-                offset += 1  # skip null terminator
+                type_field = struct.unpack_from("<B", data, offset)[0]
+                offset += 1
 
-                # Read window name (null-terminated)
-                window_name_start = offset
-                while offset < data_start + data_length and data[offset] != 0x00:
+                if offset + 4 > len(data):
+                    break
+                topic_offset = struct.unpack_from("<l", data, offset)[0]
+                offset += 4
+
+                window_number = None
+                external_file = ""
+                window_name = ""
+
+                if type_field == 1:
+                    # WindowNumber present
+                    if offset >= len(data):
+                        break
+                    window_number = struct.unpack_from("<B", data, offset)[0]
                     offset += 1
-                window_name = (
-                    self._decode_text(data[window_name_start:offset]) if offset < data_start + data_length else ""
-                )
+                elif type_field in [4, 6]:
+                    # NameOfExternalFile present
+                    external_file_start = offset
+                    while offset < data_start + data_length and data[offset] != 0x00:
+                        offset += 1
+                    if offset < data_start + data_length:
+                        external_file = self._decode_text(data[external_file_start:offset])
+                        offset += 1  # skip null terminator
+
+                    if type_field == 6:
+                        # WindowName also present
+                        window_name_start = offset
+                        while offset < data_start + data_length and data[offset] != 0x00:
+                            offset += 1
+                        if offset < data_start + data_length:
+                            window_name = self._decode_text(data[window_name_start:offset])
+                            offset += 1  # skip null terminator
 
                 offset = data_start + data_length  # Move to end of command data
 
-                command = ExternalPopupJumpCommand(
-                    external_file=external_file,
-                    window_name=window_name,
-                    context_name=context_name,
-                    no_font_change=(command_byte == 0xEE),
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {
-                            "external_file": external_file,
-                            "window_name": window_name,
-                            "context_name": context_name,
-                            "no_font_change": (command_byte == 0xEE),
+                if command_byte in [0xEA, 0xEE]:  # Popup commands
+                    command = ExternalPopupJumpCommand(
+                        type_field=type_field,
+                        topic_offset=topic_offset,
+                        window_number=window_number,
+                        external_file=external_file,
+                        window_name=window_name,
+                        no_font_change=(command_byte == 0xEE),
+                        raw_data={
+                            "raw": data[start_command_offset:offset],
+                            "parsed": {
+                                "type_field": type_field,
+                                "topic_offset": topic_offset,
+                                "window_number": window_number,
+                                "external_file": external_file,
+                                "window_name": window_name,
+                                "no_font_change": (command_byte == 0xEE),
+                            },
                         },
-                    },
-                )
-                self.formatting_commands.append(command)
-            elif command_byte in [0xEB, 0xEF]:  # ExternalTopicJumpCommand
-                if offset + 2 > len(data):
-                    break
-                data_length = struct.unpack_from("<H", data, offset)[0]
-                offset += 2
-                if offset + data_length > len(data):
-                    break
-
-                # Parse external file data following helldeco.c structure
-                data_start = offset
-
-                # Read context name (null-terminated)
-                context_name_start = offset
-                while offset < data_start + data_length and data[offset] != 0x00:
-                    offset += 1
-                if offset >= data_start + data_length:
-                    break
-                context_name = self._decode_text(data[context_name_start:offset])
-                offset += 1  # skip null terminator
-
-                # Read external file name (null-terminated)
-                external_file_start = offset
-                while offset < data_start + data_length and data[offset] != 0x00:
-                    offset += 1
-                if offset >= data_start + data_length:
-                    break
-                external_file = self._decode_text(data[external_file_start:offset])
-                offset += 1  # skip null terminator
-
-                # Read window name (null-terminated)
-                window_name_start = offset
-                while offset < data_start + data_length and data[offset] != 0x00:
-                    offset += 1
-                window_name = (
-                    self._decode_text(data[window_name_start:offset]) if offset < data_start + data_length else ""
-                )
-
-                offset = data_start + data_length  # Move to end of command data
-
-                command = ExternalTopicJumpCommand(
-                    external_file=external_file,
-                    window_name=window_name,
-                    context_name=context_name,
-                    no_font_change=(command_byte == 0xEF),
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {
-                            "external_file": external_file,
-                            "window_name": window_name,
-                            "context_name": context_name,
-                            "no_font_change": (command_byte == 0xEF),
+                    )
+                else:  # Topic jump commands (0xEB, 0xEF)
+                    command = ExternalTopicJumpCommand(
+                        type_field=type_field,
+                        topic_offset=topic_offset,
+                        window_number=window_number,
+                        external_file=external_file,
+                        window_name=window_name,
+                        no_font_change=(command_byte == 0xEF),
+                        raw_data={
+                            "raw": data[start_command_offset:offset],
+                            "parsed": {
+                                "type_field": type_field,
+                                "topic_offset": topic_offset,
+                                "window_number": window_number,
+                                "external_file": external_file,
+                                "window_name": window_name,
+                                "no_font_change": (command_byte == 0xEF),
+                            },
                         },
-                    },
-                )
+                    )
                 self.formatting_commands.append(command)
             elif command_byte == 0x00:  # End of commands
                 break
