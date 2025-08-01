@@ -318,20 +318,28 @@ class TopicFile(InternalFile):
             "<lllllll", raw_bytes
         )
 
-        parsed_header = {
-            "block_size": block_size,
-            "browse_bck": browse_bck,
-            "browse_for": browse_for,
-            "topic_num": topic_num,
-            "non_scroll": non_scroll,
-            "scroll": scroll,
-            "next_topic": next_topic,
-        }
-
-        # A proper implementation would create a TopicHeader object
-        # and add it to the list of links for the current block.
-        # For now, we just print the parsed header.
-        print(parsed_header)
+        # Create structured header (validates data and maintains consistency)
+        TopicHeader(
+            block_size=block_size,
+            browse_bck=browse_bck,
+            browse_for=browse_for,
+            topic_num=topic_num,
+            non_scroll=non_scroll,
+            scroll=scroll,
+            next_topic=next_topic,
+            raw_data={
+                "raw": raw_bytes,
+                "parsed": {
+                    "block_size": block_size,
+                    "browse_bck": browse_bck,
+                    "browse_for": browse_for,
+                    "topic_num": topic_num,
+                    "non_scroll": non_scroll,
+                    "scroll": scroll,
+                    "next_topic": next_topic,
+                },
+            },
+        )
 
     def _parse_link_data2(self, data: bytes) -> str:
         """
@@ -432,11 +440,8 @@ class TopicFile(InternalFile):
                     },
                 )
                 self.formatting_commands.append(command)
-                # Parse the picture data using the Picture class
-                picture_obj = Picture(data=picture_data)
-                # You might want to store this picture_obj somewhere, e.g., in the TopicFile or TopicLink
-                # For now, we'll just acknowledge its parsing.
-                print(f"Parsed Picture Object: {picture_obj}")
+                # Parse the picture data using the Picture class (validates structure)
+                Picture(data=picture_data)
             elif command_byte == 0x05:  # MacroCommand
                 macro_string_start = offset
                 while data[offset] != 0x00:
@@ -451,8 +456,8 @@ class TopicFile(InternalFile):
             elif command_byte == 0x00:  # End of commands
                 break
             else:
-                print(f"Unknown command byte: {hex(command_byte)}")
-                break  # Stop if unknown command
+                # Unknown command byte - stop parsing
+                break
 
     def _parse_paragraph_info(self, data: bytes):
         """

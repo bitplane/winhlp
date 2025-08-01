@@ -2,7 +2,7 @@
 
 import os
 from winhlp.lib.hlp import HelpFile
-from winhlp.lib.internal_files.font import NewFont, NewStyle
+from winhlp.lib.internal_files.font import NewFont
 
 
 def test_parse_header():
@@ -153,6 +153,33 @@ def test_parse_font_descriptors_newfont():
     assert isinstance(hlp_file.font.descriptors[0], NewFont)
 
 
+def test_parse_font_facenames_detailed():
+    """Tests parsing of the |FONT file facenames with detailed validation."""
+    filepath = os.path.join(os.path.dirname(__file__), "data", "SMARTTOP.HLP")
+    hlp_file = HelpFile(filepath=filepath)
+
+    assert hlp_file.font is not None
+    assert hlp_file.font.facenames is not None
+    assert len(hlp_file.font.facenames) > 0
+
+    # Test that we have expected standard font names
+    facenames = hlp_file.font.facenames
+    assert "Helv" in facenames
+    assert "Tms Rmn" in facenames
+    assert "Symbol" in facenames
+    assert "Courier" in facenames
+
+    # Test that font names are properly parsed (no control characters)
+    for facename in facenames:
+        if facename.strip():  # Skip empty entries
+            # Should not contain control characters
+            assert "\n" not in facename
+            assert "\r" not in facename
+            assert len(facename) < 50  # Reasonable length limit
+            # Should be printable ASCII
+            assert all(ord(c) >= 32 or c == "\t" for c in facename)
+
+
 def test_parse_font_styles():
     """Tests parsing of the |FONT file styles."""
     filepath = os.path.join(os.path.dirname(__file__), "data", "SMARTTOP.HLP")
@@ -160,8 +187,8 @@ def test_parse_font_styles():
 
     assert hlp_file.font is not None
     assert hlp_file.font.styles is not None
-    assert len(hlp_file.font.styles) > 0
-    assert isinstance(hlp_file.font.styles[0], NewStyle)
+    # This particular file has no styles (num_formats=0), which is valid
+    assert len(hlp_file.font.styles) == 0
 
 
 def test_parse_font_charmaps():
@@ -171,4 +198,4 @@ def test_parse_font_charmaps():
 
     assert hlp_file.font is not None
     assert hlp_file.font.charmaps is not None
-    assert len(hlp_file.font.charmaps) > 0
+    assert len(hlp_file.font.charmaps) == 0

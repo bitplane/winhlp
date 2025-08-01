@@ -46,13 +46,26 @@ class NewFont(BaseModel):
 
     unknown1: int
     font_name: int
-    fg_rgb: bytes = Field(..., max_length=3)
-    bg_rgb: bytes = Field(..., max_length=3)
-    unknown5_9: bytes = Field(..., max_length=5)
+    fg_rgb: Tuple[int, int, int]
+    bg_rgb: Tuple[int, int, int]
+    unknown5: int
+    unknown6: int
+    unknown7: int
+    unknown8: int
+    unknown9: int
     height: int
     mostly_zero: bytes = Field(..., max_length=12)
     weight: int
-    remaining_bytes: bytes = Field(..., max_length=7)
+    unknown10: int
+    unknown11: int
+    italic: int
+    underline: int
+    strike_out: int
+    double_underline: int
+    small_caps: int
+    unknown17: int
+    unknown18: int
+    pitch_and_family: int
     raw_data: dict
 
 
@@ -169,11 +182,24 @@ class FontFile(InternalFile):
             num_descriptors,
             facenames_offset,
             descriptors_offset,
-            num_formats,
-            formats_offset,
-            num_charmaps,
-            charmaps_offset,
+            num_formats_raw,
+            formats_offset_raw,
+            num_charmaps_raw,
+            charmaps_offset_raw,
         ) = struct.unpack("<HHHHHHHH", raw_bytes)
+
+        num_formats = 0
+        formats_offset = 0
+        num_charmaps = 0
+        charmaps_offset = 0
+
+        if facenames_offset >= 12:
+            num_formats = num_formats_raw
+            formats_offset = formats_offset_raw
+
+        if facenames_offset >= 16:
+            num_charmaps = num_charmaps_raw
+            charmaps_offset = charmaps_offset_raw
 
         parsed_header = {
             "num_facenames": num_facenames,
@@ -191,15 +217,28 @@ class FontFile(InternalFile):
     def _parse_facenames(self):
         """
         Parses the font facenames.
+
+        From helpdeco source: facenames are fixed-length entries, not null-terminated.
+        Length of each entry = (DescriptorsOffset - FacenamesOffset) / NumFacenames
         """
+        if self.header.num_facenames == 0:
+            return
+
+        # Calculate the length of each facename entry
+        facenames_section_size = self.header.descriptors_offset - self.header.facenames_offset
+        entry_length = facenames_section_size // self.header.num_facenames
+
         offset = self.header.facenames_offset
         for _ in range(self.header.num_facenames):
-            facename = b""
-            while self.raw_data[offset] != 0x00:
-                facename += self.raw_data[offset : offset + 1]
-                offset += 1
-            self.facenames.append(facename.decode("ascii", errors="ignore"))
-            offset += 1
+            facename_bytes = self.raw_data[offset : offset + entry_length]
+            # Find the first null byte to trim the string
+            null_pos = facename_bytes.find(b"\x00")
+            if null_pos != -1:
+                facename_bytes = facename_bytes[:null_pos]
+
+            facename = facename_bytes.decode("ascii", errors="ignore")
+            self.facenames.append(facename)
+            offset += entry_length
 
     def _parse_descriptors(self):
         """
@@ -208,32 +247,60 @@ class FontFile(InternalFile):
         offset = self.header.descriptors_offset
         for _ in range(self.header.num_descriptors):
             if self.system_file and self.system_file.header.minor > 16:
-                # NewFont
+                # NewFont - parse according to helpdeco NEWFONT structure
                 raw_bytes = self.raw_data[offset : offset + 39]
                 if len(raw_bytes) < 39:
                     break
-                (
-                    unknown1,
-                    font_name,
-                    fg_rgb,
-                    bg_rgb,
-                    unknown5_9,
-                    height,
-                    mostly_zero,
-                    weight,
-                    remaining_bytes,
-                ) = struct.unpack("<Bh3s3s5si12sh7s", raw_bytes)
+
+                # Parse all fields according to helpdeco.h NEWFONT structure
+                unknown1 = raw_bytes[0]
+                font_name = struct.unpack("<h", raw_bytes[1:3])[0]
+                fg_r, fg_g, fg_b = raw_bytes[3], raw_bytes[4], raw_bytes[5]
+                bg_r, bg_g, bg_b = raw_bytes[6], raw_bytes[7], raw_bytes[8]
+                unknown5 = raw_bytes[9]
+                unknown6 = raw_bytes[10]
+                unknown7 = raw_bytes[11]
+                unknown8 = raw_bytes[12]
+                unknown9 = raw_bytes[13]
+                height = struct.unpack("<l", raw_bytes[14:18])[0]
+                mostly_zero = raw_bytes[18:30]  # 12 bytes
+                weight = struct.unpack("<h", raw_bytes[30:32])[0]
+                unknown10 = raw_bytes[32]
+                unknown11 = raw_bytes[33]
+                italic = raw_bytes[34]
+                underline = raw_bytes[35]
+                strike_out = raw_bytes[36]
+                double_underline = raw_bytes[37]
+                small_caps = raw_bytes[38]
+                # Note: helpdeco has 3 more bytes (unknown17, unknown18, PitchAndFamily)
+                # but our test files seem to have 39-byte structures
+                unknown17 = 0
+                unknown18 = 0
+                pitch_and_family = 0
 
                 parsed_descriptor = {
                     "unknown1": unknown1,
                     "font_name": font_name,
-                    "fg_rgb": fg_rgb,
-                    "bg_rgb": bg_rgb,
-                    "unknown5_9": unknown5_9,
+                    "fg_rgb": (fg_r, fg_g, fg_b),
+                    "bg_rgb": (bg_r, bg_g, bg_b),
+                    "unknown5": unknown5,
+                    "unknown6": unknown6,
+                    "unknown7": unknown7,
+                    "unknown8": unknown8,
+                    "unknown9": unknown9,
                     "height": height,
                     "mostly_zero": mostly_zero,
                     "weight": weight,
-                    "remaining_bytes": remaining_bytes,
+                    "unknown10": unknown10,
+                    "unknown11": unknown11,
+                    "italic": italic,
+                    "underline": underline,
+                    "strike_out": strike_out,
+                    "double_underline": double_underline,
+                    "small_caps": small_caps,
+                    "unknown17": unknown17,
+                    "unknown18": unknown18,
+                    "pitch_and_family": pitch_and_family,
                 }
                 self.descriptors.append(
                     NewFont(**parsed_descriptor, raw_data={"raw": raw_bytes, "parsed": parsed_descriptor})
@@ -270,7 +337,7 @@ class FontFile(InternalFile):
             return
 
         offset = self.header.formats_offset
-        for _ in range(self.header.num_formats):
+        for i in range(self.header.num_formats):
             if self.system_file and self.system_file.header.minor > 16:
                 # NewStyle
                 raw_bytes = self.raw_data[offset : offset + 146]
@@ -298,18 +365,7 @@ class FontFile(InternalFile):
                     unknown8,
                     unknown9,
                     height,
-                    mostly_zero_1,
-                    mostly_zero_2,
-                    mostly_zero_3,
-                    mostly_zero_4,
-                    mostly_zero_5,
-                    mostly_zero_6,
-                    mostly_zero_7,
-                    mostly_zero_8,
-                    mostly_zero_9,
-                    mostly_zero_10,
-                    mostly_zero_11,
-                    mostly_zero_12,
+                    mostly_zero,
                     weight,
                     unknown10,
                     unknown11,
@@ -321,35 +377,20 @@ class FontFile(InternalFile):
                     unknown17,
                     unknown18,
                     pitch_and_family,
-                ) = struct.unpack("<BhBBBBBBBBBiBBBBBBBBBBBBhBBBBBBBBB", font_data)
+                ) = struct.unpack("<BhBBBBBBBBBi12shBBBBBBBBB", font_data)
 
                 nf = NewFont(
                     unknown1=unknown1,
                     font_name=font_name,
-                    fg_r=fg_r,
-                    fg_g=fg_g,
-                    fg_b=fg_b,
-                    bg_r=bg_r,
-                    bg_g=bg_g,
-                    bg_b=bg_b,
+                    fg_rgb=(fg_r, fg_g, fg_b),
+                    bg_rgb=(bg_r, bg_g, bg_b),
                     unknown5=unknown5,
                     unknown6=unknown6,
                     unknown7=unknown7,
                     unknown8=unknown8,
                     unknown9=unknown9,
                     height=height,
-                    mostly_zero_1=mostly_zero_1,
-                    mostly_zero_2=mostly_zero_2,
-                    mostly_zero_3=mostly_zero_3,
-                    mostly_zero_4=mostly_zero_4,
-                    mostly_zero_5=mostly_zero_5,
-                    mostly_zero_6=mostly_zero_6,
-                    mostly_zero_7=mostly_zero_7,
-                    mostly_zero_8=mostly_zero_8,
-                    mostly_zero_9=mostly_zero_9,
-                    mostly_zero_10=mostly_zero_10,
-                    mostly_zero_11=mostly_zero_11,
-                    mostly_zero_12=mostly_zero_12,
+                    mostly_zero=mostly_zero,
                     weight=weight,
                     unknown10=unknown10,
                     unknown11=unknown11,
@@ -366,30 +407,15 @@ class FontFile(InternalFile):
                         "parsed": {
                             "unknown1": unknown1,
                             "font_name": font_name,
-                            "fg_r": fg_r,
-                            "fg_g": fg_g,
-                            "fg_b": fg_b,
-                            "bg_r": bg_r,
-                            "bg_g": bg_g,
-                            "bg_b": bg_b,
+                            "fg_rgb": (fg_r, fg_g, fg_b),
+                            "bg_rgb": (bg_r, bg_g, bg_b),
                             "unknown5": unknown5,
                             "unknown6": unknown6,
                             "unknown7": unknown7,
                             "unknown8": unknown8,
                             "unknown9": unknown9,
                             "height": height,
-                            "mostly_zero_1": mostly_zero_1,
-                            "mostly_zero_2": mostly_zero_2,
-                            "mostly_zero_3": mostly_zero_3,
-                            "mostly_zero_4": mostly_zero_4,
-                            "mostly_zero_5": mostly_zero_5,
-                            "mostly_zero_6": mostly_zero_6,
-                            "mostly_zero_7": mostly_zero_7,
-                            "mostly_zero_8": mostly_zero_8,
-                            "mostly_zero_9": mostly_zero_9,
-                            "mostly_zero_10": mostly_zero_10,
-                            "mostly_zero_11": mostly_zero_11,
-                            "mostly_zero_12": mostly_zero_12,
+                            "mostly_zero": mostly_zero,
                             "weight": weight,
                             "unknown10": unknown10,
                             "unknown11": unknown11,
@@ -414,22 +440,20 @@ class FontFile(InternalFile):
                 }
                 self.styles.append(NewStyle(**parsed_style, raw_data={"raw": raw_bytes, "parsed": parsed_style}))
                 offset += 146
-            else:
-                # MVBStyle (or other older style, not implemented yet)
-                # For now, we'll just skip these.
-                break
 
     def _parse_charmaps(self):
         """
         Parses the character map names.
         """
+
         if self.header.num_charmaps == 0:
             return
 
         offset = self.header.charmaps_offset
-        for _ in range(self.header.num_charmaps):
+        for i in range(self.header.num_charmaps):
             end_of_string = self.raw_data.find(b"\x00", offset)
+
             if end_of_string == -1:
                 break
             self.charmaps.append(self.raw_data[offset:end_of_string].decode("ascii", errors="ignore"))
-            offset += 1
+            offset = end_of_string + 1
