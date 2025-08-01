@@ -183,12 +183,26 @@ class VfldCommand(BaseModel):
     value: int
     raw_data: dict
 
+    def to_rtf(self) -> str:
+        """Generate RTF output following C reference implementation."""
+        if self.value:
+            return f"\\{{vfld{self.value}\\}}"
+        else:
+            return "\\{vfld\\}"
+
 
 class DtypeCommand(BaseModel):
     """0x21 - {dtype n} command for MVB files"""
 
     value: int
     raw_data: dict
+
+    def to_rtf(self) -> str:
+        """Generate RTF output following C reference implementation."""
+        if self.value:
+            return f"\\{{dtype{self.value}\\}}"
+        else:
+            return "\\{dtype\\}"
 
 
 # 0x80-0x8C Commands (Text formatting and special characters)
@@ -1093,14 +1107,18 @@ class TopicFile(InternalFile):
             if command_byte == 0x20:  # vfld MVB
                 if offset + 4 > len(data):
                     break
-                _ = struct.unpack_from("<l", data, offset)[0]  # vfld_number - MVB specific, unused
+                _vfld_number = struct.unpack_from("<l", data, offset)[
+                    0
+                ]  # MVB specific, properly handled in interleaved parser
                 offset += 4
                 # Skip for now - MVB specific
                 continue
             elif command_byte == 0x21:  # dtype MVB
                 if offset + 2 > len(data):
                     break
-                _ = struct.unpack_from("<h", data, offset)[0]  # dtype_number - MVB specific, unused
+                _dtype_number = struct.unpack_from("<h", data, offset)[
+                    0
+                ]  # MVB specific, properly handled in interleaved parser
                 offset += 2
                 # Skip for now - MVB specific
                 continue
@@ -1910,7 +1928,7 @@ class TopicFile(InternalFile):
 
                         # Set hyperlink formatting based on command type
                         is_popup = command_byte in [0xE0, 0xE2, 0xE6]
-                        no_font_change = command_byte in [0xE6, 0xE7]
+                        _no_font_change = command_byte in [0xE6, 0xE7]
 
                         # TODO: Implement no_font_change behavior - preserve current font instead of changing
 
@@ -2374,9 +2392,9 @@ class TopicFile(InternalFile):
 
             # Parse column header following helldeco.c structure
             if link_data1_ptr + 4 < len(link_data1):
-                column_number = struct.unpack_from("<h", link_data1, link_data1_ptr)[0]
-                formatting_flags = struct.unpack_from("<H", link_data1, link_data1_ptr + 2)[0]
-                cell_id = struct.unpack_from("<B", link_data1, link_data1_ptr + 4)[0] - 0x80
+                _column_number = struct.unpack_from("<h", link_data1, link_data1_ptr)[0]
+                _formatting_flags = struct.unpack_from("<H", link_data1, link_data1_ptr + 2)[0]
+                _cell_id = struct.unpack_from("<B", link_data1, link_data1_ptr + 4)[0] - 0x80
                 link_data1_ptr += 5
 
                 # TODO: Use column_number, formatting_flags, and cell_id for proper table cell formatting
@@ -2409,7 +2427,7 @@ class TopicFile(InternalFile):
                     first_line_indent, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
                 if para_bits & 0x0100:  # border info
                     if link_data1_ptr < len(link_data1):
-                        border_info = link_data1[link_data1_ptr]
+                        _border_info = link_data1[link_data1_ptr]
                         link_data1_ptr += 1
                         border_width, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
 
