@@ -9,6 +9,8 @@ from .internal_files.topic import TopicFile
 from .internal_files.context import ContextFile
 from .internal_files.phrase import PhraseFile
 from .internal_files.ctxomap import CtxoMapFile
+from .internal_files.catalog import CatalogFile
+from .internal_files.viola import ViolaFile
 from .exceptions import InvalidHLPFileError
 import struct
 
@@ -44,6 +46,8 @@ class HelpFile(BaseModel):
     context: Optional[ContextFile] = None
     phrase: Optional[PhraseFile] = None
     ctxomap: Optional[CtxoMapFile] = None
+    catalog: Optional[CatalogFile] = None
+    viola: Optional[ViolaFile] = None
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
@@ -63,6 +67,8 @@ class HelpFile(BaseModel):
         self.context = self._parse_context()
         self.phrase = self._parse_phrase()
         self.ctxomap = self._parse_ctxomap()
+        self.catalog = self._parse_catalog()
+        self.viola = self._parse_viola()
 
     def _parse_header(self) -> HLPHeader:
         """
@@ -209,3 +215,33 @@ class HelpFile(BaseModel):
 
         ctxomap_data = self.data[ctxomap_offset + 9 : ctxomap_offset + 9 + used_space]
         return CtxoMapFile(filename="|CTXOMAP", raw_data=ctxomap_data)
+
+    def _parse_catalog(self) -> CatalogFile:
+        """
+        Parses the |CATALOG internal file.
+        """
+        if "|CATALOG" not in self.directory.files:
+            return None
+
+        catalog_offset = self.directory.files["|CATALOG"]
+        # We need to read the file header to know the size of the |CATALOG file
+        file_header_data = self.data[catalog_offset : catalog_offset + 9]
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        catalog_data = self.data[catalog_offset + 9 : catalog_offset + 9 + used_space]
+        return CatalogFile(filename="|CATALOG", raw_data=catalog_data)
+
+    def _parse_viola(self) -> ViolaFile:
+        """
+        Parses the |VIOLA internal file.
+        """
+        if "|VIOLA" not in self.directory.files:
+            return None
+
+        viola_offset = self.directory.files["|VIOLA"]
+        # We need to read the file header to know the size of the |VIOLA file
+        file_header_data = self.data[viola_offset : viola_offset + 9]
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        viola_data = self.data[viola_offset + 9 : viola_offset + 9 + used_space]
+        return ViolaFile(filename="|VIOLA", raw_data=viola_data)
