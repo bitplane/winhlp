@@ -248,9 +248,12 @@ class FontFile(InternalFile):
         for _ in range(self.header.num_descriptors):
             if self.system_file and self.system_file.header.minor > 16:
                 # NewFont - parse according to helpdeco NEWFONT structure
-                raw_bytes = self.raw_data[offset : offset + 39]
-                if len(raw_bytes) < 39:
-                    break
+                raw_bytes = self.raw_data[offset : offset + 42]
+                if len(raw_bytes) < 42:
+                    # Fallback for files with shorter structures (39 bytes)
+                    raw_bytes = self.raw_data[offset : offset + 39]
+                    if len(raw_bytes) < 39:
+                        break
 
                 # Parse all fields according to helpdeco.h NEWFONT structure
                 unknown1 = raw_bytes[0]
@@ -272,11 +275,16 @@ class FontFile(InternalFile):
                 strike_out = raw_bytes[36]
                 double_underline = raw_bytes[37]
                 small_caps = raw_bytes[38]
-                # Note: helpdeco has 3 more bytes (unknown17, unknown18, PitchAndFamily)
-                # but our test files seem to have 39-byte structures
-                unknown17 = 0
-                unknown18 = 0
-                pitch_and_family = 0
+                # Parse the remaining 3 bytes if available (full NEWFONT structure)
+                if len(raw_bytes) >= 42:
+                    unknown17 = raw_bytes[39]
+                    unknown18 = raw_bytes[40]
+                    pitch_and_family = raw_bytes[41]
+                else:
+                    # Fallback for shorter structures
+                    unknown17 = 0
+                    unknown18 = 0
+                    pitch_and_family = 0
 
                 parsed_descriptor = {
                     "unknown1": unknown1,
@@ -305,7 +313,7 @@ class FontFile(InternalFile):
                 self.descriptors.append(
                     NewFont(**parsed_descriptor, raw_data={"raw": raw_bytes, "parsed": parsed_descriptor})
                 )
-                offset += 39
+                offset += len(raw_bytes)  # Advance by actual bytes read (39 or 42)
             else:
                 # OldFont
                 raw_bytes = self.raw_data[offset : offset + 8]

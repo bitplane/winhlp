@@ -36,6 +36,7 @@ class BitmapPicture(BaseModel):
     compressed_offset: int
     hotspot_offset: int
     palette: bytes = b""
+    decompressed_data: bytes = b""
     raw_data: dict
 
 
@@ -54,23 +55,25 @@ class MetafilePicture(BaseModel):
     hotspot_size: int
     compressed_offset: int
     hotspot_offset: int
+    decompressed_data: bytes = b""
     raw_data: dict
 
 
 class Hotspot(BaseModel):
     """
     Structure for a single hotspot in a picture.
-    From `helpdeco.h`: HOTSPOT
+    From helpdeco.h and splitmrb.c: HOTSPOT (15 bytes packed)
     """
 
-    id0: int
-    id1: int
-    id2: int
-    x: int
-    y: int
-    w: int
-    h: int
-    hash_or_macrodataindex: int
+    binding_type: int  # Derived from c1: 1=Jump, 2=Pop-up, 3=Macro
+    visible: bool  # Derived from c2: True if c2==0, False if c2!=0
+    x: int  # Left border
+    y: int  # Top border
+    w: int  # Width
+    h: int  # Height
+    hash_value: int  # Hash for topic lookup
+    name: str = ""  # Hotspot name string
+    context: str = ""  # Context/macro string
     raw_data: dict
 
 
@@ -193,7 +196,15 @@ class Picture(BaseModel):
             "hotspot_offset": hotspot_offset,
             "palette": palette,
         }
-        return BitmapPicture(**parsed_bitmap, raw_data={"raw": data[start_offset:offset], "parsed": parsed_bitmap})
+        bitmap = BitmapPicture(**parsed_bitmap, raw_data={"raw": data[start_offset:offset], "parsed": parsed_bitmap})
+
+        # Add decompressed bitmap data if compression is used
+        if bitmap.packing_method > 0 and bitmap.compressed_size > 0:
+            bitmap.decompressed_data = self._decompress_picture_data(
+                data, bitmap.compressed_offset, bitmap.compressed_size, bitmap.packing_method
+            )
+
+        return bitmap
 
     def _parse_metafile_picture(self, data: bytes, offset: int) -> MetafilePicture:
         """
@@ -226,9 +237,17 @@ class Picture(BaseModel):
             "compressed_offset": compressed_offset,
             "hotspot_offset": hotspot_offset,
         }
-        return MetafilePicture(
+        metafile = MetafilePicture(
             **parsed_metafile, raw_data={"raw": data[start_offset:offset], "parsed": parsed_metafile}
         )
+
+        # Add decompressed metafile data if compression is used
+        if metafile.packing_method > 0 and metafile.compressed_size > 0:
+            metafile.decompressed_data = self._decompress_picture_data(
+                data, metafile.compressed_offset, metafile.compressed_size, metafile.packing_method
+            )
+
+        return metafile
 
     def _parse_hotspots(self, data: bytes):
         """
@@ -237,125 +256,163 @@ class Picture(BaseModel):
         # Hotspot data follows the picture data. The offset is relative to the start of the picture data.
         # The number of hotspots is not explicitly stored in the PictureHeader, but rather
         # inferred from the hotspot_size in BitmapPicture/MetafilePicture.
-        # For now, we'll assume a simple case where hotspots are at the end of the picture data.
-        # A more robust implementation would need to track the current offset more carefully.
+        # Parse hotspot data at the specific offsets indicated by the picture headers
 
-        # This is a simplified placeholder. Real hotspot parsing is more complex.
-        # It involves iterating through the hotspot data based on hotspot_size and parsing each Hotspot structure.
-        # The HotspotStringData usually follows all Hotspot structures.
-
-        # For demonstration, let's assume a single hotspot for now if hotspot_size > 0
+        # Parse hotspot data following C implementation in splitmrb.c PrintHotspotInfo
         if self.bitmaps:
             for bitmap in self.bitmaps:
-                if bitmap.hotspot_size > 0:
-                    hotspot_offset = bitmap.hotspot_offset
-                    # Assuming a fixed size for a single hotspot for now (20 bytes based on helpdeco.h)
-                    if len(data) >= hotspot_offset + 20:
-                        id0, id1, id2, x, y, w, h, hash_or_macrodataindex = struct.unpack_from(
-                            "<HHHHllll", data, hotspot_offset
-                        )
-                        parsed_hotspot = {
-                            "id0": id0,
-                            "id1": id1,
-                            "id2": id2,
-                            "x": x,
-                            "y": y,
-                            "w": w,
-                            "h": h,
-                            "hash_or_macrodataindex": hash_or_macrodataindex,
-                        }
-                        hotspot = Hotspot(
-                            **parsed_hotspot,
-                            raw_data={"raw": data[hotspot_offset : hotspot_offset + 20], "parsed": parsed_hotspot},
-                        )
-                        self.hotspots.append(hotspot)
+                if bitmap.hotspot_size > 0 and bitmap.hotspot_offset > 0:
+                    self._parse_hotspot_data(data, bitmap.hotspot_offset)
 
-                        # Assuming hotspot string data immediately follows the hotspot structure
-                        # This is a simplification; actual parsing might involve more complex offsets
-                        hotspot_string_offset = hotspot_offset + 20
-                        if len(data) > hotspot_string_offset:
-                            # Read null-terminated strings
-                            current_string_offset = hotspot_string_offset
-                            hotspot_name_bytes = b""
-                            while current_string_offset < len(data) and data[current_string_offset] != 0x00:
-                                hotspot_name_bytes += data[current_string_offset : current_string_offset + 1]
-                                current_string_offset += 1
-                            hotspot_name = hotspot_name_bytes.decode("ascii")
-                            current_string_offset += 1  # Skip null terminator
-
-                            context_name_or_macro_bytes = b""
-                            while current_string_offset < len(data) and data[current_string_offset] != 0x00:
-                                context_name_or_macro_bytes += data[current_string_offset : current_string_offset + 1]
-                                current_string_offset += 1
-                            context_name_or_macro = context_name_or_macro_bytes.decode("ascii")
-                            current_string_offset += 1  # Skip null terminator
-
-                            parsed_hotspot_string = {
-                                "hotspot_name": hotspot_name,
-                                "context_name_or_macro": context_name_or_macro,
-                            }
-                            hotspot_string = HotspotStringData(
-                                **parsed_hotspot_string,
-                                raw_data={
-                                    "raw": data[hotspot_string_offset:current_string_offset],
-                                    "parsed": parsed_hotspot_string,
-                                },
-                            )
-                            self.hotspot_strings.append(hotspot_string)
-        elif self.metafiles:
+        if self.metafiles:
             for metafile in self.metafiles:
-                if metafile.hotspot_size > 0:
-                    hotspot_offset = metafile.hotspot_offset
-                    # Assuming a fixed size for a single hotspot for now (20 bytes based on helpdeco.h)
-                    if len(data) >= hotspot_offset + 20:
-                        id0, id1, id2, x, y, w, h, hash_or_macrodataindex = struct.unpack_from(
-                            "<HHHHllll", data, hotspot_offset
-                        )
-                        parsed_hotspot = {
-                            "id0": id0,
-                            "id1": id1,
-                            "id2": id2,
-                            "x": x,
-                            "y": y,
-                            "w": w,
-                            "h": h,
-                            "hash_or_macrodataindex": hash_or_macrodataindex,
-                        }
-                        hotspot = Hotspot(
-                            **parsed_hotspot,
-                            raw_data={"raw": data[hotspot_offset : hotspot_offset + 20], "parsed": parsed_hotspot},
-                        )
-                        self.hotspots.append(hotspot)
+                if metafile.hotspot_size > 0 and metafile.hotspot_offset > 0:
+                    self._parse_hotspot_data(data, metafile.hotspot_offset)
 
-                        # Assuming hotspot string data immediately follows the hotspot structure
-                        # This is a simplification; actual parsing might involve more complex offsets
-                        hotspot_string_offset = hotspot_offset + 20
-                        if len(data) > hotspot_string_offset:
-                            # Read null-terminated strings
-                            current_string_offset = hotspot_string_offset
-                            hotspot_name_bytes = b""
-                            while current_string_offset < len(data) and data[current_string_offset] != 0x00:
-                                hotspot_name_bytes += data[current_string_offset : current_string_offset + 1]
-                                current_string_offset += 1
-                            hotspot_name = hotspot_name_bytes.decode("ascii")
-                            current_string_offset += 1  # Skip null terminator
+    def _parse_hotspot_data(self, data: bytes, hotspot_offset: int):
+        """Parse hotspot data following C implementation in splitmrb.c PrintHotspotInfo"""
+        if hotspot_offset >= len(data):
+            return
 
-                            context_name_or_macro_bytes = b""
-                            while current_string_offset < len(data) and data[current_string_offset] != 0x00:
-                                context_name_or_macro_bytes += data[current_string_offset : current_string_offset + 1]
-                                current_string_offset += 1
-                            context_name_or_macro = context_name_or_macro_bytes.decode("ascii")
-                            current_string_offset += 1  # Skip null terminator
+        offset = hotspot_offset
 
-                            parsed_hotspot_string = {
-                                "hotspot_name": hotspot_name,
-                                "context_name_or_macro": context_name_or_macro,
-                            }
-                            hotspot_string = HotspotStringData(
-                                **parsed_hotspot_string,
-                                raw_data={
-                                    "raw": data[hotspot_string_offset:current_string_offset],
-                                    "parsed": parsed_hotspot_string,
-                                },
-                            )
-                            self.hotspot_strings.append(hotspot_string)
+        # Read format byte (should be 1)
+        if offset >= len(data):
+            return
+        format_byte = data[offset]
+        offset += 1
+
+        if format_byte != 1:
+            return
+
+        # Read number of hotspots
+        if offset + 2 > len(data):
+            return
+        num_hotspots = struct.unpack_from("<H", data, offset)[0]
+        offset += 2
+
+        if num_hotspots == 0:
+            return
+
+        # Read macro data size
+        if offset + 2 > len(data):
+            return
+        macro_data_size = struct.unpack_from("<H", data, offset)[0]
+        offset += 2
+
+        # Skip ignored word
+        if offset + 2 > len(data):
+            return
+        offset += 2
+
+        # Read hotspot structures (15 bytes each: 3 bytes + 4 words + 4 bytes)
+        hotspot_structs = []
+        for i in range(num_hotspots):
+            if offset + 15 > len(data):
+                break
+            c1, c2, c3, x, y, w, h, hash_value = struct.unpack_from("<BBBhhhhL", data, offset)
+            hotspot_structs.append((c1, c2, c3, x, y, w, h, hash_value))
+            offset += 15
+
+        # Skip macro data
+        offset += macro_data_size
+
+        # Read null-terminated strings for each hotspot
+        for i, (c1, c2, c3, x, y, w, h, hash_value) in enumerate(hotspot_structs):
+            if offset >= len(data):
+                break
+
+            # Read hotspot name (null-terminated)
+            name_start = offset
+            while offset < len(data) and data[offset] != 0:
+                offset += 1
+            if offset >= len(data):
+                break
+            name = data[name_start:offset].decode("latin-1", errors="ignore")
+            offset += 1  # skip null terminator
+
+            # Read context/buffer string (null-terminated)
+            buffer_start = offset
+            while offset < len(data) and data[offset] != 0:
+                offset += 1
+            if offset >= len(data):
+                break
+            context = data[buffer_start:offset].decode("latin-1", errors="ignore")
+            offset += 1  # skip null terminator
+
+            # Determine hotspot type from C code logic
+            if (c1 & 0xF0) == 0xC0:
+                binding_type = 3  # Macro
+            elif c1 & 1:
+                binding_type = 1  # Jump
+            else:
+                binding_type = 2  # Pop-up
+
+            visible = c2 == 0  # c2=0 means visible, c2!=0 means invisible
+
+            hotspot = Hotspot(
+                binding_type=binding_type,
+                visible=visible,
+                x=x,
+                y=y,
+                w=w,
+                h=h,
+                hash_value=hash_value,
+                name=name,
+                context=context,
+                raw_data={
+                    "parsed": {
+                        "c1": c1,
+                        "c2": c2,
+                        "c3": c3,
+                        "binding_type": binding_type,
+                        "visible": visible,
+                        "x": x,
+                        "y": y,
+                        "w": w,
+                        "h": h,
+                        "hash_value": hash_value,
+                        "name": name,
+                        "context": context,
+                    }
+                },
+            )
+            self.hotspots.append(hotspot)
+
+    def _decompress_picture_data(
+        self, data: bytes, compressed_offset: int, compressed_size: int, packing_method: int
+    ) -> bytes:
+        """
+        Decompress picture data using the appropriate method.
+
+        From helldeco.c and the file format documentation:
+        - packing_method 0: No compression
+        - packing_method 1: RunLen compression
+        - packing_method 2: LZ77 compression
+        - packing_method 3: ZLIB compression (rarely used)
+        """
+        if packing_method == 0:
+            # No compression - return raw data
+            return data[compressed_offset : compressed_offset + compressed_size]
+
+        # Get compressed data
+        compressed_data = data[compressed_offset : compressed_offset + compressed_size]
+
+        if packing_method == 1:
+            # RunLen compression
+            from .compression import decompress
+
+            return decompress(method=1, data=compressed_data)
+        elif packing_method == 2:
+            # LZ77 compression
+            from .compression import decompress
+
+            return decompress(method=2, data=compressed_data)
+        elif packing_method == 3:
+            # ZLIB compression
+            from .compression import decompress
+
+            return decompress(method=3, data=compressed_data)
+        else:
+            # Unknown compression method - return raw data
+            return compressed_data

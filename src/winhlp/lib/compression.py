@@ -8,62 +8,72 @@ def lz77_decompress(data: bytes) -> bytes:
     """
     Decompresses LZ77 compressed data from a HLP file.
 
-    Based on the algorithm documented in helpfile.md from helpdeco.
-    The LZ77 decompression algorithm works as follows:
-    - Take the next byte
-    - Start at the least significant bit
-    - If the bit is cleared: Copy 1 byte from source to destination
-    - Else: Get the next WORD into struct { unsigned pos:12; unsigned len:4; }
-      Copy len+3 bytes from destination-pos-1 to destination
-    - Loop until all bits are done
-    - Loop until all bytes are consumed
+    Optimized implementation based on helldec1.c from helpdeco.
+    Uses circular buffer and efficient bit processing like the C version.
     """
     if not data:
         return b""
 
+    # Circular buffer like C version (4KB)
+    lz_buffer = bytearray(0x1000)
     output = bytearray()
+
+    data_len = len(data)
     offset = 0
+    pos = 0  # Position in circular buffer
+    mask = 0
+    bits = 0
 
-    while offset < len(data):
-        # Get the control byte
-        control_byte = data[offset]
-        offset += 1
+    while offset < data_len:
+        if mask == 0:
+            # Need new control byte
+            if offset >= data_len:
+                break
+            bits = data[offset]
+            offset += 1
+            mask = 1
 
-        # Process each bit in the control byte
-        for bit_pos in range(8):
-            if offset >= len(data):
+        if bits & mask:
+            # Compressed data: back-reference
+            if offset + 1 >= data_len:
                 break
 
-            # Check if the bit is set (starting from LSB)
-            if control_byte & (1 << bit_pos):
-                # Compressed data: get position and length
-                if offset + 1 >= len(data):
-                    break
+            # Use struct.unpack_from for efficiency
+            word = struct.unpack_from("<H", data, offset)[0]
+            offset += 2
 
-                # Read 16-bit value in little-endian format
-                word = struct.unpack("<H", data[offset : offset + 2])[0]
-                offset += 2
+            # Extract fields
+            length = ((word >> 12) & 0x0F) + 3
+            back_pos = pos - (word & 0x0FFF) - 1
 
-                # Extract position (12 bits) and length (4 bits)
-                pos = word & 0x0FFF  # Lower 12 bits
-                length = (word >> 12) + 3  # Upper 4 bits + 3
-
-                # Copy from earlier in the output buffer
-                start_pos = len(output) - pos - 1
-                if start_pos < 0:
-                    # Invalid position, skip
-                    continue
-
-                # Copy length bytes from start_pos
+            # Copy from circular buffer - direct slice when possible
+            if length <= 16:  # Small copies - use individual operations
+                for _ in range(length):
+                    char = lz_buffer[back_pos & 0x0FFF]
+                    lz_buffer[pos & 0x0FFF] = char
+                    output.append(char)
+                    back_pos += 1
+                    pos += 1
+            else:  # Larger copies - batch them
+                copy_chars = bytearray(length)
                 for i in range(length):
-                    if start_pos + i < len(output):
-                        output.append(output[start_pos + i])
-                    else:
-                        break
-            else:
-                # Literal byte: copy directly
-                output.append(data[offset])
-                offset += 1
+                    char = lz_buffer[back_pos & 0x0FFF]
+                    lz_buffer[pos & 0x0FFF] = char
+                    copy_chars[i] = char
+                    back_pos += 1
+                    pos += 1
+                output.extend(copy_chars)
+        else:
+            # Literal byte
+            if offset >= data_len:
+                break
+            char = data[offset]
+            offset += 1
+            lz_buffer[pos & 0x0FFF] = char
+            output.append(char)
+            pos += 1
+
+        mask <<= 1
 
     return bytes(output)
 
@@ -147,7 +157,7 @@ def hall_decompress(data: bytes, phrases: List[str]) -> bytes:
                 break
             next_ch = data[offset]
             offset += 1
-            phrase_num = ch * 64 + 64 + next_ch
+            phrase_num = 128 + (ch // 4) * 256 + next_ch
             if 0 <= phrase_num < len(phrases):
                 phrase = phrases[phrase_num]
                 output.extend(phrase.encode("latin-1"))
@@ -238,5 +248,6 @@ def decompress(method: int, data: bytes, phrases: List[str] = None) -> bytes:
         temp = runlen_decompress(data)
         return lz77_decompress(temp)
     else:
+        raise ValueError("Unknown compression type")
         # Unknown method, return as-is
-        return data
+        # return data

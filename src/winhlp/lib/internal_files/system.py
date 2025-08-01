@@ -1,8 +1,8 @@
 """Parser for the |SYSTEM internal file."""
 
 from .base import InternalFile
-from pydantic import BaseModel, Field
-from typing import Tuple, Optional
+from pydantic import BaseModel, Field, model_serializer
+from typing import Tuple, Optional, Any
 import struct
 
 
@@ -93,10 +93,23 @@ class SystemFile(InternalFile):
     encoding: str = "cp1252"  # Default Windows Western European
     lcid: Optional[int] = None
     charset: Optional[int] = None
+    icon: Optional[bytes] = None  # Type 5: ICON file data
+    cnt_filename: Optional[str] = None  # Type 10: CNT filename
+    groups: list = []  # Type 13: GROUPS definitions
+    dllmaps: list = []  # Type 19: DLLMAPS definitions
+    parent_hlp: Any = None
 
-    def __init__(self, **data):
+    def __init__(self, parent_hlp=None, **data):
         super().__init__(**data)
+        self.parent_hlp = parent_hlp
         self._parse()
+
+    @model_serializer
+    def serialize_model(self):
+        """Custom serializer to exclude parent_hlp circular reference"""
+        data = self.__dict__.copy()
+        data.pop("parent_hlp", None)  # Remove circular reference
+        return data
 
     def _parse(self):
         """
@@ -160,18 +173,26 @@ class SystemFile(InternalFile):
                 self._parse_contents(record_data)
             elif record_type == 4:  # MACRO
                 self._parse_macro(record_data)
+            elif record_type == 5:  # ICON
+                self._parse_icon(record_data)
             elif record_type == 6:  # SecWindow
                 self._parse_sec_window(record_data)
             elif record_type == 8:  # CITATION
                 self._parse_citation(record_data)
             elif record_type == 9:  # LCID (Locale ID)
                 self._parse_lcid(record_data)
+            elif record_type == 10:  # CNT
+                self._parse_cnt(record_data)
             elif record_type == 11:  # CHARSET
                 self._parse_charset(record_data)
             elif record_type == 12:  # DEFFONT
                 self._parse_def_font(record_data)
+            elif record_type == 13:  # GROUPS
+                self._parse_groups(record_data)
             elif record_type == 14:  # KeyIndex
                 self._parse_key_index(record_data)
+            elif record_type == 19:  # DLLMAPS
+                self._parse_dllmaps(record_data)
             else:
                 # For unknown record types, just store the raw data
                 self.records.append({"type": record_type, "size": data_size, "data": record_data})
@@ -460,3 +481,72 @@ class SystemFile(InternalFile):
 
         if charset in charset_to_encoding:
             self.encoding = charset_to_encoding[charset]
+
+    def _parse_icon(self, data: bytes):
+        """Parses an ICON record (record type 5)."""
+        # The data is a complete Windows .ICO file format
+        self.icon = data
+        parsed_record = {"icon_size": len(data)}
+        self.records.append({"type": "ICON", "icon_data": data, "raw_data": {"raw": data, "parsed": parsed_record}})
+
+    def _parse_cnt(self, data: bytes):
+        """Parses a CNT record (record type 10)."""
+        # CNT filename - null-terminated string
+        cnt_filename = self._decode_text(data.split(b"\x00")[0])
+        self.cnt_filename = cnt_filename
+        parsed_record = {"cnt_filename": cnt_filename}
+        self.records.append(
+            {"type": "CNT", "cnt_filename": cnt_filename, "raw_data": {"raw": data, "parsed": parsed_record}}
+        )
+
+    def _parse_groups(self, data: bytes):
+        """Parses a GROUPS record (record type 13)."""
+        # GROUP definition - null-terminated string
+        group_definition = self._decode_text(data.split(b"\x00")[0])
+        self.groups.append(group_definition)
+        parsed_record = {"group_definition": group_definition}
+        self.records.append(
+            {"type": "GROUPS", "group_definition": group_definition, "raw_data": {"raw": data, "parsed": parsed_record}}
+        )
+
+    def _parse_dllmaps(self, data: bytes):
+        """Parses a DLLMAPS record (record type 19)."""
+        # DLLMAPS structure: four null-terminated strings
+        # Win16RetailDLL, Win16DebugDLL, Win32RetailDLL, Win32DebugDLL
+        strings = []
+        offset = 0
+
+        # Parse up to 4 null-terminated strings
+        for i in range(4):
+            if offset >= len(data):
+                break
+            string_start = offset
+            while offset < len(data) and data[offset] != 0:
+                offset += 1
+            if offset < len(data):
+                string_value = self._decode_text(data[string_start:offset])
+                strings.append(string_value)
+                offset += 1  # Skip null terminator
+            else:
+                break
+
+        # Pad with empty strings if needed
+        while len(strings) < 4:
+            strings.append("")
+
+        dllmap = DLLMaps(
+            win16_retail_dll=strings[0],
+            win16_debug_dll=strings[1],
+            win32_retail_dll=strings[2],
+            win32_debug_dll=strings[3],
+            raw_data={"raw": data, "parsed": {"strings": strings}},
+        )
+
+        self.dllmaps.append(dllmap)
+        parsed_record = {
+            "win16_retail_dll": strings[0],
+            "win16_debug_dll": strings[1],
+            "win32_retail_dll": strings[2],
+            "win32_debug_dll": strings[3],
+        }
+        self.records.append({"type": "DLLMAPS", "dllmap": dllmap, "raw_data": {"raw": data, "parsed": parsed_record}})

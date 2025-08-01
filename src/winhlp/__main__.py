@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 import base64
 from winhlp.lib.hlp import HelpFile
 
@@ -25,9 +26,11 @@ def main():
         hlp_file = HelpFile(filepath=args.hlp_filepath)
         # Use the custom encoder for serialization
         print(json.dumps(hlp_file.model_dump(), indent=2, cls=BytesEncoder))
+        return 0
     except Exception as e:
         print(f"Error parsing HLP file: {e}")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

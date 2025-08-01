@@ -4,18 +4,7 @@ import os
 import json
 import pytest
 from winhlp.lib.hlp import HelpFile
-
-
-def json_serializable(obj):
-    """Convert object to JSON-serializable format by handling bytes."""
-    if isinstance(obj, bytes):
-        return f"<bytes: {len(obj)} bytes>"
-    elif isinstance(obj, dict):
-        return {k: json_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [json_serializable(item) for item in obj]
-    else:
-        return obj
+from winhlp.__main__ import BytesEncoder
 
 
 def get_all_hlp_files():
@@ -40,9 +29,8 @@ def test_json_dump(hlp_file):
     try:
         hlp = HelpFile(filepath=hlp_file)
 
-        # Try to convert to JSON (handle bytes fields)
-        data = json_serializable(hlp.model_dump())
-        json_str = json.dumps(data, indent=2)
+        # Try to convert to JSON using BytesEncoder
+        json_str = json.dumps(hlp.model_dump(), indent=2, cls=BytesEncoder)
 
         # Basic checks
         assert json_str is not None

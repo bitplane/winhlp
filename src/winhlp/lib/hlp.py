@@ -1,11 +1,11 @@
 """Main HLP file reader class."""
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List, Dict
 from .directory import Directory
 from .internal_files.system import SystemFile
 from .internal_files.font import FontFile
-from .internal_files.topic import TopicFile
+from .internal_files.topic import TopicFile, ParsedTopic
 from .internal_files.context import ContextFile
 from .internal_files.phrase import PhraseFile
 from .internal_files.ctxomap import CtxoMapFile
@@ -13,6 +13,7 @@ from .internal_files.catalog import CatalogFile
 from .internal_files.viola import ViolaFile
 from .internal_files.gmacros import GMacrosFile
 from .internal_files.phrindex import PhrIndexFile
+from .internal_files.bitmap import BitmapFile
 from .exceptions import InvalidHLPFileError
 import struct
 
@@ -52,12 +53,106 @@ class HelpFile(BaseModel):
     viola: Optional[ViolaFile] = None
     gmacros: Optional[GMacrosFile] = None
     phrindex: Optional[PhrIndexFile] = None
+    bitmaps: Dict[str, BitmapFile] = {}
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
         with open(self.filepath, "rb") as f:
             self.data = f.read()
         self.parse()
+
+    def get_topics(self) -> List[ParsedTopic]:
+        """Get all parsed topics with structured content."""
+        if self.topic:
+            return self.topic.get_all_topics()
+        return []
+
+    def get_topic_by_number(self, topic_number: int) -> Optional[ParsedTopic]:
+        """Get a specific topic by its number."""
+        if self.topic:
+            return self.topic.get_topic_by_number(topic_number)
+        return None
+
+    def get_topic_by_context_name(self, context_name: str) -> Optional[ParsedTopic]:
+        """Get a topic by its context name using hash lookup."""
+        if not self.context or not self.topic:
+            return None
+
+        # Calculate hash for the context name
+        hash_value = ContextFile.calculate_hash(context_name)
+
+        # Get topic offset from context mapping
+        topic_offset = self.context.get_topic_offset_for_hash(hash_value)
+        if topic_offset is None:
+            return None
+
+        # Find the topic with this offset (simplified - would need proper topic offset resolution)
+        for topic in self.topic.get_all_topics():
+            if topic.topic_number is not None:  # Basic matching - needs improvement
+                return topic
+
+        return None
+
+    def extract_bitmap(self, bitmap_name: str) -> Optional[bytes]:
+        """Extract a bitmap as BMP file data."""
+        if bitmap_name not in self.bitmaps:
+            return None
+
+        bitmap_file = self.bitmaps[bitmap_name]
+        return bitmap_file.extract_bitmap_as_bmp(0)
+
+    def get_topic_with_resolved_images(self, topic_number: int) -> Optional[dict]:
+        """Get a topic with all embedded images resolved to bitmap data."""
+        topic = self.get_topic_by_number(topic_number)
+        if not topic:
+            return None
+
+        return {
+            "topic": topic,
+            "embedded_images": topic.resolve_embedded_images(self),
+            "hotspots": topic.get_clickable_regions(),
+            "hyperlinks": topic.get_hyperlinks(),
+        }
+
+    def get_all_hotspots(self) -> Dict[str, List]:
+        """Get all hotspots from all bitmaps with their context names."""
+        all_hotspots = {}
+
+        for bitmap_name, bitmap_file in self.bitmaps.items():
+            hotspots_with_context = []
+
+            for bitmap in bitmap_file.bitmaps:
+                for hotspot in bitmap.hotspots:
+                    context_name = ContextFile.reverse_hash(hotspot.hash_value)
+                    hotspot_info = {
+                        "x": hotspot.x,
+                        "y": hotspot.y,
+                        "width": hotspot.width,
+                        "height": hotspot.height,
+                        "hash": hotspot.hash_value,
+                        "context_name": context_name,
+                        "topic_offset": self.context.get_topic_offset_for_hash(hotspot.hash_value)
+                        if self.context
+                        else None,
+                    }
+                    hotspots_with_context.append(hotspot_info)
+
+            if hotspots_with_context:
+                all_hotspots[bitmap_name] = hotspots_with_context
+
+        return all_hotspots
+
+    def extract_all_text(self) -> str:
+        """Extract all text content as plain text."""
+        if self.topic:
+            return self.topic.extract_all_text()
+        return ""
+
+    def get_topic_count(self) -> int:
+        """Get the total number of topics in the help file."""
+        if self.topic:
+            return len(self.topic.get_all_topics())
+        return 0
 
     def parse(self):
         """
@@ -75,6 +170,7 @@ class HelpFile(BaseModel):
         self.viola = self._parse_viola()
         self.gmacros = self._parse_gmacros()
         self.phrindex = self._parse_phrindex()
+        self.bitmaps = self._parse_bitmaps()
 
     def _parse_header(self) -> HLPHeader:
         """
@@ -152,7 +248,7 @@ class HelpFile(BaseModel):
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         system_data = self.data[system_offset + 9 : system_offset + 9 + used_space]
-        return SystemFile(filename="|SYSTEM", raw_data=system_data)
+        return SystemFile(filename="|SYSTEM", raw_data=system_data, parent_hlp=self)
 
     def _parse_font(self) -> FontFile:
         """
@@ -305,4 +401,33 @@ class HelpFile(BaseModel):
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         phrindex_data = self.data[phrindex_offset + 9 : phrindex_offset + 9 + used_space]
-        return PhrIndexFile(filename="|PhrIndex", raw_data=phrindex_data)
+        return PhrIndexFile(filename="|PhrIndex", raw_data=phrindex_data, system_file=self.system)
+
+    def _parse_bitmaps(self) -> Dict[str, BitmapFile]:
+        """
+        Parses all bitmap files (|bm0, |bm1, |bm2, etc.) in the directory.
+        """
+        bitmaps = {}
+
+        # Look for all bitmap files in the directory
+        for filename, offset in self.directory.files.items():
+            if filename.startswith("|bm") and len(filename) > 3:
+                # Extract bitmap number (e.g., |bm0 -> 0, |bm123 -> 123)
+                bitmap_num = filename[3:]
+                if bitmap_num.isdigit():
+                    try:
+                        # Read the file header to know the size
+                        file_header_data = self.data[offset : offset + 9]
+                        if len(file_header_data) >= 9:
+                            reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+                            # Extract bitmap data
+                            bitmap_data = self.data[offset + 9 : offset + 9 + used_space]
+                            bitmap_file = BitmapFile(filename=filename, raw_data=bitmap_data)
+                            bitmaps[filename] = bitmap_file
+
+                    except (struct.error, IndexError):
+                        # Skip malformed bitmap files
+                        continue
+
+        return bitmaps

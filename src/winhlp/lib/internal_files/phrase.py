@@ -2,7 +2,7 @@
 
 from .base import InternalFile
 from typing import List, Optional, Any
-from ..compression import lz77_decompress
+from ..compression import decompress
 import struct
 
 
@@ -75,13 +75,13 @@ class PhraseFile(InternalFile):
             phrase_offsets_size = (self.phrase_count + 1) * 2  # WORDs
             phrase_data_start = offset + phrase_offsets_size
             phrase_data_length = len(self.raw_data) - phrase_data_start
-            decompressed_size = phrase_data_length
+            _decompressed_size = phrase_data_length
         else:
             # Windows 3.1+: LZ77 compressed
             # Read decompressed size as DWORD
             if offset + 4 > len(self.raw_data):
                 return
-            decompressed_size = struct.unpack_from("<L", self.raw_data, offset)[0]
+            _decompressed_size = struct.unpack_from("<L", self.raw_data, offset)[0]
             offset += 4
 
             phrase_offsets_size = (self.phrase_count + 1) * 2  # WORDs
@@ -110,11 +110,7 @@ class PhraseFile(InternalFile):
             phrase_data = phrase_data_raw
         else:
             # LZ77 decompression (method 2)
-            try:
-                phrase_data = lz77_decompress(phrase_data_raw)
-            except Exception:
-                # If decompression fails, treat as uncompressed
-                phrase_data = phrase_data_raw
+            phrase_data = decompress(method=2, data=phrase_data_raw)
 
         # Extract individual phrases
         for i in range(self.phrase_count):
