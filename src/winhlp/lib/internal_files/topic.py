@@ -1441,6 +1441,8 @@ class TopicFile(InternalFile):
                     },
                 )
                 self.formatting_commands.append(command)
+            # TODO: Re-implement parsing of external jump commands (0xEA, 0xEB, 0xEE, 0xEF)
+            # to match the helpfile.md struct and the C code's handling of Type and subsequent fields.
             elif command_byte in [0xEA, 0xEE]:  # ExternalPopupJumpCommand
                 if offset + 2 > len(data):
                     break

@@ -175,8 +175,10 @@ class SystemFile(InternalFile):
                 self._parse_macro(record_data)
             elif record_type == 5:  # ICON
                 self._parse_icon(record_data)
-            elif record_type == 6:  # SecWindow
-                self._parse_sec_window(record_data)
+            elif record_type == 6:  # WINDOW
+                # TODO: Implement detailed parsing for SECWINDOW and MVBWINDOW structures.
+                # This is complex, depends on WinHelp version (3.1 vs Viewer 2.0)
+                parsed_data = {"window_data": data_bytes.hex()}
             elif record_type == 8:  # CITATION
                 self._parse_citation(record_data)
             elif record_type == 9:  # LCID (Locale ID)
@@ -190,6 +192,9 @@ class SystemFile(InternalFile):
             elif record_type == 13:  # GROUPS
                 self._parse_groups(record_data)
             elif record_type == 14:  # KeyIndex
+                # TODO: Implement conditional parsing for RecordType 14.
+                # It can be either INDEX_SEPARATORS (string) or KEYINDEX (struct),
+                # depending on whether it's a multimedia file (check self.parent_hlp.system.multi).
                 self._parse_key_index(record_data)
             elif record_type == 19:  # DLLMAPS
                 self._parse_dllmaps(record_data)
@@ -290,42 +295,17 @@ class SystemFile(InternalFile):
         """
         Parses a KeyIndex record.
         """
-        if len(data) < 110:  # 10+10+10+80 bytes required
-            # Handle truncated KeyIndex record - extract what we can and pad to correct field sizes
-            btree_name = data[:10] if len(data) >= 10 else data + b"\x00" * (10 - len(data))
-            btree_name = btree_name[:10]  # Ensure exactly 10 bytes
-
-            map_name_start = 10
-            map_name_data = (
-                data[map_name_start : map_name_start + 10]
-                if len(data) > map_name_start
-                else data[map_name_start:]
-                if len(data) > map_name_start
-                else b""
-            )
-            map_name = (map_name_data + b"\x00" * (10 - len(map_name_data)))[:10]
-
-            data_name_start = 20
-            data_name_data = (
-                data[data_name_start : data_name_start + 10]
-                if len(data) > data_name_start
-                else data[data_name_start:]
-                if len(data) > data_name_start
-                else b""
-            )
-            data_name = (data_name_data + b"\x00" * (10 - len(data_name_data)))[:10]
-
-            title_start = 30
-            title_data = (
-                data[title_start : title_start + 80]
-                if len(data) > title_start
-                else data[title_start:]
-                if len(data) > title_start
-                else b""
-            )
-            title = (title_data + b"\x00" * (80 - len(title_data)))[:80]
+        if len(data) >= 110:
+            btree_name = data[0:10].decode("ascii", errors="ignore").split("\x00")[0]
+            map_name = data[10:20].decode("ascii", errors="ignore").split("\x00")[0]
+            data_name = data[20:30].decode("ascii", errors="ignore").split("\x00")[0]
+            title = data[30:110].decode("ascii", errors="ignore").split("\x00")[0]
         else:
-            btree_name, map_name, data_name, title = struct.unpack("<10s10s10s80s", data)
+            # Handle truncated KeyIndex record - extract what we can and pad to correct field sizes
+            btree_name = data[:10].decode("ascii", errors="ignore").split("\x00")[0] if len(data) >= 10 else ""
+            map_name = data[10:20].decode("ascii", errors="ignore").split("\x00")[0] if len(data) >= 20 else ""
+            data_name = data[20:30].decode("ascii", errors="ignore").split("\x00")[0] if len(data) >= 30 else ""
+            title = data[30:110].decode("ascii", errors="ignore").split("\x00")[0] if len(data) >= 110 else ""
 
         parsed_record = {
             "btree_name": btree_name,
@@ -339,20 +319,18 @@ class SystemFile(InternalFile):
         """
         Parses a DefFont record.
         """
-        if len(data) < 35:  # 2+1+32 bytes required
-            # Handle truncated DefFont record
-            height_in_points = struct.unpack("<H", data[:2])[0] if len(data) >= 2 else 0
-            charset = data[2] if len(data) >= 3 else 0
-            font_name = (
-                data[3:35] if len(data) >= 35 else (data[3:] if len(data) > 3 else b"") + b"\x00" * (35 - len(data))
-            )
+        if len(data) >= 3:
+            height_in_points, charset = struct.unpack("<HB", data[:3])
+            font_name = self._decode_text(data[3:].split(b"\x00")[0])
         else:
-            height_in_points, charset, font_name = struct.unpack("<HB32s", data)
+            height_in_points = 0
+            charset = 0
+            font_name = ""
 
         parsed_record = {
             "height_in_points": height_in_points,
             "charset": charset,
-            "font_name": self._decode_text(font_name.split(b"\x00")[0]),
+            "font_name": font_name,
         }
         self.records.append(DefFont(**parsed_record, raw_data={"raw": data, "parsed": parsed_record}))
 

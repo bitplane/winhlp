@@ -465,3 +465,6 @@ class FontFile(InternalFile):
                 break
             self.charmaps.append(self.raw_data[offset:end_of_string].decode("ascii", errors="ignore"))
             offset = end_of_string + 1
+        # TODO: Implement parsing of actual *.tbl files (CharMapHeader and CharMapEntry).
+        # The C code in `helpdeco.c` (FontLoad function) reads and processes these files.
+        # This will likely involve creating a new internal file parser for .tbl files.
