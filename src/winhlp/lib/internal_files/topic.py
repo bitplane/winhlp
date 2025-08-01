@@ -1545,8 +1545,6 @@ class TopicFile(InternalFile):
                 # Unknown command byte - create diagnostic exception like topic parsing
                 raise NotImplementedError(
                     f"Unknown formatting command 0x{command_byte:02X} at offset {start_command_offset}. "
-                    f"Topic file contains unsupported formatting command. "
-                    f"Data around command: {data[max(0, start_command_offset-5):start_command_offset+10].hex()}"
                 )
                 # break
 
