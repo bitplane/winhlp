@@ -11,6 +11,8 @@ from .internal_files.phrase import PhraseFile
 from .internal_files.ctxomap import CtxoMapFile
 from .internal_files.catalog import CatalogFile
 from .internal_files.viola import ViolaFile
+from .internal_files.gmacros import GMacrosFile
+from .internal_files.phrindex import PhrIndexFile
 from .exceptions import InvalidHLPFileError
 import struct
 
@@ -48,6 +50,8 @@ class HelpFile(BaseModel):
     ctxomap: Optional[CtxoMapFile] = None
     catalog: Optional[CatalogFile] = None
     viola: Optional[ViolaFile] = None
+    gmacros: Optional[GMacrosFile] = None
+    phrindex: Optional[PhrIndexFile] = None
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
@@ -69,6 +73,8 @@ class HelpFile(BaseModel):
         self.ctxomap = self._parse_ctxomap()
         self.catalog = self._parse_catalog()
         self.viola = self._parse_viola()
+        self.gmacros = self._parse_gmacros()
+        self.phrindex = self._parse_phrindex()
 
     def _parse_header(self) -> HLPHeader:
         """
@@ -245,3 +251,33 @@ class HelpFile(BaseModel):
 
         viola_data = self.data[viola_offset + 9 : viola_offset + 9 + used_space]
         return ViolaFile(filename="|VIOLA", raw_data=viola_data)
+
+    def _parse_gmacros(self) -> GMacrosFile:
+        """
+        Parses the |GMACROS internal file.
+        """
+        if "|GMACROS" not in self.directory.files:
+            return None
+
+        gmacros_offset = self.directory.files["|GMACROS"]
+        # We need to read the file header to know the size of the |GMACROS file
+        file_header_data = self.data[gmacros_offset : gmacros_offset + 9]
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        gmacros_data = self.data[gmacros_offset + 9 : gmacros_offset + 9 + used_space]
+        return GMacrosFile(filename="|GMACROS", raw_data=gmacros_data)
+
+    def _parse_phrindex(self) -> PhrIndexFile:
+        """
+        Parses the |PhrIndex internal file.
+        """
+        if "|PhrIndex" not in self.directory.files:
+            return None
+
+        phrindex_offset = self.directory.files["|PhrIndex"]
+        # We need to read the file header to know the size of the |PhrIndex file
+        file_header_data = self.data[phrindex_offset : phrindex_offset + 9]
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        phrindex_data = self.data[phrindex_offset + 9 : phrindex_offset + 9 + used_space]
+        return PhrIndexFile(filename="|PhrIndex", raw_data=phrindex_data)
