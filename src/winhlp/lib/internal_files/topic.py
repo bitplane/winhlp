@@ -156,9 +156,9 @@ class JumpCommand(BaseModel):
 class ExternalJumpCommand(BaseModel):
     jump_type: int
     topic_offset: int
-    window_number: int = None
-    external_file: str = None
-    window_name: str = None
+    window_number: Optional[int] = None
+    external_file: Optional[str] = None
+    window_name: Optional[str] = None
     raw_data: dict
 
 
@@ -294,15 +294,41 @@ class TopicFile(InternalFile):
                 "record_type": record_type,
             }
 
+            # Validate the TopicLink structure before using it (following helpdeco.c patterns)
+            # Check for clearly invalid values that would cause parsing errors
+            if next_block <= 0 and record_type != 0x02:  # TL_TOPICHDR can have next_block <= 0
+                break
+            if data_len1 < 0 or data_len2 < 0 or block_size < 0:
+                break
+            if data_len1 > 65536 or data_len2 > 65536 or block_size > 1048576:  # Reasonable limits
+                break
+
             link = TopicLink(**parsed_link, raw_data={"raw": raw_bytes, "parsed": parsed_link})
 
             # DataLen1 includes the size of TOPICLINK in Win 3.1+
+            # Add bounds checking to prevent negative offsets and buffer overruns
             if self.system_file and self.system_file.header.minor <= 16:
-                link_data1 = block_data[offset + link_offset : offset + link_offset + data_len1]
-                link_data2 = block_data[offset + link_offset + data_len1 : offset + block_size]
+                data1_start = offset + link_offset
+                data1_end = offset + link_offset + data_len1
+                data2_end = offset + block_size
+
+                # Validate bounds
+                if data1_start < 0 or data1_end < data1_start or data2_end < data1_end or data2_end > len(block_data):
+                    break
+
+                link_data1 = block_data[data1_start:data1_end]
+                link_data2 = block_data[data1_end:data2_end]
             else:
-                link_data1 = block_data[offset + link_offset : offset + data_len1]
-                link_data2 = block_data[offset + data_len1 : offset + block_size]
+                data1_start = offset + link_offset
+                data1_end = offset + data_len1
+                data2_end = offset + block_size
+
+                # Validate bounds
+                if data1_start < 0 or data1_end < data1_start or data2_end < data1_end or data2_end > len(block_data):
+                    break
+
+                link_data1 = block_data[data1_start:data1_end]
+                link_data2 = block_data[data1_end:data2_end]
 
             self._parse_link_data(link, link_data1, link_data2)
 
@@ -371,13 +397,21 @@ class TopicFile(InternalFile):
         """
         Parses the formatting commands that follow ParagraphInfo.
         """
+        # Guard against invalid data
+        if not data or len(data) == 0:
+            return
+
         offset = 0
         while offset < len(data):
             start_command_offset = offset
+            if offset + 1 > len(data):
+                break
             command_byte = struct.unpack_from("<B", data, offset)[0]
             offset += 1
 
             if command_byte == 0x01:  # TextFormatCommand
+                if offset + 1 > len(data):
+                    break
                 font_number = struct.unpack_from("<B", data, offset)[0]
                 offset += 1
                 command = TextFormatCommand(
@@ -386,6 +420,8 @@ class TopicFile(InternalFile):
                 )
                 self.formatting_commands.append(command)
             elif command_byte == 0x02:  # JumpCommand
+                if offset + 4 > len(data):
+                    break
                 topic_offset = struct.unpack_from("<l", data, offset)[0]
                 offset += 4
                 command = JumpCommand(
@@ -394,6 +430,8 @@ class TopicFile(InternalFile):
                 )
                 self.formatting_commands.append(command)
             elif command_byte == 0x03:  # ExternalJumpCommand
+                if offset + 5 > len(data):  # Need at least 1 byte for jump_type + 4 bytes for topic_offset
+                    break
                 jump_type = struct.unpack_from("<B", data, offset)[0]
                 offset += 1
                 topic_offset = struct.unpack_from("<l", data, offset)[0]
@@ -403,20 +441,26 @@ class TopicFile(InternalFile):
                 window_name = None
 
                 if jump_type == 0x01:  # JUMP_TYPE_WINDOW
+                    if offset + 1 > len(data):
+                        break
                     window_number = struct.unpack_from("<B", data, offset)[0]
                     offset += 1
                 elif jump_type == 0x02:  # JUMP_TYPE_EXTERNAL
                     # Read null-terminated string for external_file
                     external_file_start = offset
-                    while data[offset] != 0x00:
+                    while offset < len(data) and data[offset] != 0x00:
                         offset += 1
+                    if offset >= len(data):
+                        break
                     external_file = data[external_file_start:offset].decode("ascii")
                     offset += 1  # for null terminator
 
                     # Read null-terminated string for window_name
                     window_name_start = offset
-                    while data[offset] != 0x00:
+                    while offset < len(data) and data[offset] != 0x00:
                         offset += 1
+                    if offset >= len(data):
+                        break
                     window_name = data[window_name_start:offset].decode("ascii")
                     offset += 1  # for null terminator
 
@@ -439,10 +483,14 @@ class TopicFile(InternalFile):
                 )
                 self.formatting_commands.append(command)
             elif command_byte == 0x04:  # PictureCommand
+                if offset + 5 > len(data):  # Need 1 byte for picture_type + 4 bytes for picture_size
+                    break
                 picture_type = struct.unpack_from("<B", data, offset)[0]
                 offset += 1
                 picture_size = struct.unpack_from("<l", data, offset)[0]
                 offset += 4
+                if offset + picture_size > len(data):
+                    break
                 picture_data = data[offset : offset + picture_size]
                 offset += picture_size
                 command = PictureCommand(
@@ -463,8 +511,10 @@ class TopicFile(InternalFile):
                 # Picture(data=picture_data)
             elif command_byte == 0x05:  # MacroCommand
                 macro_string_start = offset
-                while data[offset] != 0x00:
+                while offset < len(data) and data[offset] != 0x00:
                     offset += 1
+                if offset >= len(data):
+                    break
                 macro_string = data[macro_string_start:offset].decode("ascii")
                 offset += 1  # for null terminator
                 command = MacroCommand(
@@ -520,49 +570,57 @@ class TopicFile(InternalFile):
         tab_info = None
 
         if bits.unknown_follows:
-            unknown = struct.unpack_from("<l", data, offset)[0]
-            offset += 4
+            if offset + 4 <= len(data):
+                unknown = struct.unpack_from("<l", data, offset)[0]
+                offset += 4
 
         if bits.spacing_above_follows:
-            spacing_above = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
+            if offset + 2 <= len(data):
+                spacing_above = struct.unpack_from("<h", data, offset)[0]
+                offset += 2
 
         if bits.spacing_below_follows:
-            spacing_below = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
+            if offset + 2 <= len(data):
+                spacing_below = struct.unpack_from("<h", data, offset)[0]
+                offset += 2
 
         if bits.spacing_lines_follows:
-            spacing_lines = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
+            if offset + 2 <= len(data):
+                spacing_lines = struct.unpack_from("<h", data, offset)[0]
+                offset += 2
 
         if bits.left_indent_follows:
-            left_indent = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
+            if offset + 2 <= len(data):
+                left_indent = struct.unpack_from("<h", data, offset)[0]
+                offset += 2
 
         if bits.right_indent_follows:
-            right_indent = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
+            if offset + 2 <= len(data):
+                right_indent = struct.unpack_from("<h", data, offset)[0]
+                offset += 2
 
         if bits.firstline_indent_follows:
-            firstline_indent = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
+            if offset + 2 <= len(data):
+                firstline_indent = struct.unpack_from("<h", data, offset)[0]
+                offset += 2
 
         if bits.borderinfo_follows:
-            border_info_raw = struct.unpack_from("<H", data, offset)[0]
-            offset += 2
-            border_width = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
-            border_info = BorderInfo(
-                border_box=bool(border_info_raw & 0x0001),
-                border_top=bool(border_info_raw & 0x0002),
-                border_left=bool(border_info_raw & 0x0004),
-                border_bottom=bool(border_info_raw & 0x0008),
-                border_right=bool(border_info_raw & 0x0010),
-                border_thick=bool(border_info_raw & 0x0020),
-                border_double=bool(border_info_raw & 0x0040),
-                border_unknown=bool(border_info_raw & 0x0080),
-                border_width=border_width,
-            )
+            if offset + 4 <= len(data):  # Need 2 bytes for border_info_raw + 2 bytes for border_width
+                border_info_raw = struct.unpack_from("<H", data, offset)[0]
+                offset += 2
+                border_width = struct.unpack_from("<h", data, offset)[0]
+                offset += 2
+                border_info = BorderInfo(
+                    border_box=bool(border_info_raw & 0x0001),
+                    border_top=bool(border_info_raw & 0x0002),
+                    border_left=bool(border_info_raw & 0x0004),
+                    border_bottom=bool(border_info_raw & 0x0008),
+                    border_right=bool(border_info_raw & 0x0010),
+                    border_thick=bool(border_info_raw & 0x0020),
+                    border_double=bool(border_info_raw & 0x0040),
+                    border_unknown=bool(border_info_raw & 0x0080),
+                    border_width=border_width,
+                )
 
         if bits.tabinfo_follows:
             if offset + 2 <= len(data):

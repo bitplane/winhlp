@@ -56,17 +56,17 @@ The library uses Python's `struct` module extensively to parse binary data accor
 
 ## Testing
 
-Tests use real HLP files stored in `tests/data/`:
-- `FXSEARCH.HLP` - Windows 3.0 format help file
-- `SMARTTOP.HLP` - Windows 3.1+ format with advanced features
-- `FXUNDEL.HLP` - Additional test cases
+Tests use real HLP files stored in `tests/data/`. We have several hard-coded examples, and a dir `errors` which contains "known bad" (errors in our parser) files.
+These are created by gaz running `./scripts/collect_test_data_files.py` across a large number of files extracted from hundreds of ISO images, floppy disks, and Windows installations.
+Our goal is to correctly parse every HLP file we can find.
 
 Tests follow pytest patterns and verify both structure parsing and data extraction from these reference files.
 
 ## Key Implementation Notes
 
-- The library prioritizes correctness over performance, loading entire files into memory
+- The library prioritizes correctness over performance, loading entire files into memory. The majority of these files
 - Pydantic models provide data validation and structured access to parsed data
-- The implementation closely follows the original C reference code structure
+- The implementation closely follows the original C reference code structure.
 - Binary format documentation in `doc/helpfile.md` is the authoritative reference
+- Under `doc/ref` you can find known good source code for a C implementation. Check with this implementation before applying band-aid fixes, as the original code that we're fixing didn't do this.
 - Support for different compression methods and file format versions is handled throughout

@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 from collections import defaultdict
 import json
+import struct
 
 # Add src to path so we can import winhlp
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -48,13 +49,40 @@ def get_error_signature(exc_info):
     return f"{filename}:{line_number}:{type(exc_value).__name__}:{error_message}"
 
 
+def has_hlp_magic_number(file_path):
+    """Check if file has the correct HLP magic number (0x00035F3F)."""
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read(4)
+            if len(data) < 4:
+                return False
+            magic = struct.unpack("<L", data)[0]
+            return magic == 0x00035F3F
+    except (IOError, struct.error):
+        return False
+
+
 def collect_hlp_files(search_path):
-    """Find all HLP files recursively in the given path."""
+    """Find all HLP files recursively in the given path that have valid HLP magic numbers."""
     hlp_files = []
+    skipped_files = []
+
     for root, dirs, files in os.walk(search_path):
         for file in files:
             if file.upper().endswith(".HLP"):
-                hlp_files.append(os.path.join(root, file))
+                file_path = os.path.join(root, file)
+                if has_hlp_magic_number(file_path):
+                    hlp_files.append(file_path)
+                else:
+                    skipped_files.append(file_path)
+
+    if skipped_files:
+        print(f"Skipped {len(skipped_files)} files with invalid HLP magic numbers:")
+        for f in skipped_files[:5]:  # Show first 5
+            print(f"  - {os.path.basename(f)}")
+        if len(skipped_files) > 5:
+            print(f"  ... and {len(skipped_files) - 5} more")
+
     return hlp_files
 
 

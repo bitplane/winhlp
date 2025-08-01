@@ -270,19 +270,39 @@ class SystemFile(InternalFile):
         Parses a KeyIndex record.
         """
         if len(data) < 110:  # 10+10+10+80 bytes required
-            # Handle truncated KeyIndex record
+            # Handle truncated KeyIndex record - extract what we can and pad to correct field sizes
             btree_name = data[:10] if len(data) >= 10 else data + b"\x00" * (10 - len(data))
-            map_name = (
-                data[10:20] if len(data) >= 20 else (data[10:] if len(data) > 10 else b"") + b"\x00" * (20 - len(data))
+            btree_name = btree_name[:10]  # Ensure exactly 10 bytes
+
+            map_name_start = 10
+            map_name_data = (
+                data[map_name_start : map_name_start + 10]
+                if len(data) > map_name_start
+                else data[map_name_start:]
+                if len(data) > map_name_start
+                else b""
             )
-            data_name = (
-                data[20:30] if len(data) >= 30 else (data[20:] if len(data) > 20 else b"") + b"\x00" * (30 - len(data))
+            map_name = (map_name_data + b"\x00" * (10 - len(map_name_data)))[:10]
+
+            data_name_start = 20
+            data_name_data = (
+                data[data_name_start : data_name_start + 10]
+                if len(data) > data_name_start
+                else data[data_name_start:]
+                if len(data) > data_name_start
+                else b""
             )
-            title = (
-                data[30:110]
-                if len(data) >= 110
-                else (data[30:] if len(data) > 30 else b"") + b"\x00" * (110 - len(data))
+            data_name = (data_name_data + b"\x00" * (10 - len(data_name_data)))[:10]
+
+            title_start = 30
+            title_data = (
+                data[title_start : title_start + 80]
+                if len(data) > title_start
+                else data[title_start:]
+                if len(data) > title_start
+                else b""
             )
+            title = (title_data + b"\x00" * (80 - len(title_data)))[:80]
         else:
             btree_name, map_name, data_name, title = struct.unpack("<10s10s10s80s", data)
 

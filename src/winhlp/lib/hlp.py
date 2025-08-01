@@ -111,7 +111,12 @@ class HelpFile(BaseModel):
         magic, dir_start, free_block, file_size = struct.unpack("<Llll", raw_bytes)
 
         if magic != 0x00035F3F:
-            raise InvalidHLPFileError(f"Invalid magic number: {magic:#0x}")
+            # Check if it looks like text data (common mistake)
+            first_bytes = self.data[:16]
+            if all(32 <= b <= 126 or b in [9, 10, 13] for b in first_bytes):
+                raise InvalidHLPFileError(f"File appears to be text data, not a binary HLP file (magic: {magic:#0x})")
+            else:
+                raise InvalidHLPFileError(f"Invalid HLP magic number: {magic:#0x} (expected 0x00035F3F)")
 
         parsed_header = {
             "magic": magic,
