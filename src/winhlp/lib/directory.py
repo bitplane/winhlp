@@ -111,16 +111,20 @@ class Directory(BaseModel):
         // SearchFile function shows the logic for traversing the B-Tree
         // to find a file.
         """
-        for page in self.btree.get_leaf_pages():
-            unused, n_entries, prev_page, next_page = struct.unpack("<hhhh", page[:8])
-            offset = 8
+        for page, n_entries in self.btree.iterate_leaf_pages():
+            offset = 8  # Skip page header
             for _ in range(n_entries):
+                # Find null-terminated filename
                 end_of_string = page.find(b"\x00", offset)
                 if end_of_string == -1:
                     break
+
                 filename = page[offset:end_of_string].decode("ascii", errors="ignore")
                 offset = end_of_string + 1
 
+                # Read file offset
                 file_offset = struct.unpack_from("<l", page, offset)[0]
                 offset += 4
+
+                # Store in directory
                 self.files[filename] = file_offset

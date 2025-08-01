@@ -65,9 +65,8 @@ class ContextFile(InternalFile):
         if not self.btree:
             return
 
-        for page in self.btree.get_leaf_pages():
-            unused, n_entries, prev_page, next_page = struct.unpack("<hhhh", page[:8])
-            offset = 8
+        for page, n_entries in self.btree.iterate_leaf_pages():
+            offset = 8  # Skip page header
 
             for _ in range(n_entries):
                 if offset + 8 > len(page):

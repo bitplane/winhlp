@@ -1,7 +1,7 @@
 """Generic B+ tree implementation for HLP files."""
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Iterator, Tuple
 from .exceptions import BTreeError
 import struct
 
@@ -49,6 +49,27 @@ class BTreeIndexHeader(BaseModel):
     n_entries: int
     previous_page: int
     raw_data: dict
+
+
+class BTreeBuffer(BaseModel):
+    """
+    State management for B+ tree iteration.
+    Based on helpdeco's BUFFER struct used with GetFirstPage/GetNextPage.
+
+    From `helpdeco.h`:
+    typedef struct
+    {
+        int32_t FirstLeaf;
+        uint16_t PageSize;
+        int16_t NextPage;
+    }
+    BUFFER;
+    """
+
+    first_leaf: int = Field(..., description="Starting position of B+ tree data")
+    page_size: int = Field(..., description="Size of each page")
+    next_page: int = Field(..., description="Index of next page to read (-1 if done)")
+    current_offset: int = Field(default=0, description="Current position in data stream")
 
 
 class BTree(BaseModel):
@@ -179,70 +200,99 @@ class BTree(BaseModel):
             page_end = page_start + self.header.page_size
             self.pages.append(page_data[page_start:page_end])
 
-    def get_leaf_pages(self):
+    def get_first_page(self) -> Tuple[int, BTreeBuffer]:
         """
-        Traverses the B-Tree to find and yield each leaf page in order.
+        Finds the first leaf page in the B+ tree and returns its entry count.
+        Based on helpdeco's GetFirstPage function.
 
-        This logic is based on the GetFirstPage and GetNextPage functions in
-        the reference C code.
-
-        From `helpdec1.c`:
-        int16_t GetFirstPage(FILE* HelpFile, BUFFER* buf, long* TotalEntries)
-        {
-            int CurrLevel;
-            BTREEHEADER BTreeHdr;
-            BTREENODEHEADER CurrNode;
-
-            read_BTREEHEADER(&BTreeHdr, HelpFile);
-            if (TotalEntries) *TotalEntries = BTreeHdr.TotalBtreeEntries;
-            if (!BTreeHdr.TotalBtreeEntries) return 0;
-            buf->FirstLeaf = ftell(HelpFile);
-            buf->PageSize = BTreeHdr.PageSize;
-            fseek(HelpFile, buf->FirstLeaf + BTreeHdr.RootPage * (long)BTreeHdr.PageSize, SEEK_SET);
-            for (CurrLevel = 1; CurrLevel < BTreeHdr.NLevels; CurrLevel++)
-            {
-                read_BTREEINDEXHEADER_to_BTREENODEHEADER(&CurrNode, HelpFile);
-                fseek(HelpFile, buf->FirstLeaf + CurrNode.PreviousPage * (long)BTreeHdr.PageSize, SEEK_SET);
-            }
-            read_BTREENODEHEADER(&CurrNode, HelpFile);
-            buf->NextPage = CurrNode.NextPage;
-            return CurrNode.NEntries;
-        }
-
-        int16_t GetNextPage(FILE* HelpFile, BUFFER* buf) /* walk Btree */
-        {
-            BTREENODEHEADER CurrNode;
-
-            if (buf->NextPage == -1) return 0;
-            fseek(HelpFile, buf->FirstLeaf + buf->NextPage * (long)buf->PageSize, SEEK_SET);
-            read_BTREENODEHEADER(&CurrNode, HelpFile);
-            buf->NextPage = CurrNode.NextPage;
-            return CurrNode.NEntries;
-        }
+        Returns:
+            Tuple of (number of entries, buffer state for iteration)
         """
         if not self.header.total_btree_entries:
+            return 0, None
+
+        # Create buffer to track iteration state
+        buffer = BTreeBuffer(
+            first_leaf=38,  # After B+ tree header
+            page_size=self.header.page_size,
+            next_page=-1,
+            current_offset=38,
+        )
+
+        # Navigate from root to first leaf
+        page_index = self.header.root_page
+
+        # Go down through index levels to reach leaf level
+        for curr_level in range(1, self.header.n_levels):
+            if page_index < 0 or page_index >= len(self.pages):
+                raise BTreeError(f"Invalid page index: {page_index}")
+
+            page = self.pages[page_index]
+            # Read index header
+            unknown, n_entries, prev_page = struct.unpack("<hhh", page[:6])
+            page_index = prev_page
+
+        # Now we're at the leaf level
+        if page_index < 0 or page_index >= len(self.pages):
+            raise BTreeError(f"Invalid leaf page index: {page_index}")
+
+        page = self.pages[page_index]
+        # Read leaf header
+        unknown, n_entries, prev_page, next_page = struct.unpack("<hhhh", page[:8])
+
+        buffer.next_page = next_page
+        buffer.current_offset = buffer.first_leaf + page_index * buffer.page_size + 8
+
+        return n_entries, buffer
+
+    def get_next_page(self, buffer: BTreeBuffer) -> int:
+        """
+        Gets the next leaf page in the B+ tree.
+        Based on helpdeco's GetNextPage function.
+
+        Args:
+            buffer: State from previous get_first_page or get_next_page call
+
+        Returns:
+            Number of entries in the page (0 if no more pages)
+        """
+        if buffer.next_page == -1:
+            return 0
+
+        if buffer.next_page < 0 or buffer.next_page >= len(self.pages):
+            raise BTreeError(f"Invalid next page index: {buffer.next_page}")
+
+        page = self.pages[buffer.next_page]
+        # Read leaf header
+        unknown, n_entries, prev_page, next_page = struct.unpack("<hhhh", page[:8])
+
+        buffer.next_page = next_page
+        buffer.current_offset = buffer.first_leaf + buffer.next_page * buffer.page_size + 8
+
+        return n_entries
+
+    def iterate_leaf_pages(self) -> Iterator[Tuple[bytes, int]]:
+        """
+        Iterates through all leaf pages using the GetFirstPage/GetNextPage approach.
+
+        Yields:
+            Tuple of (page data, number of entries)
+        """
+        n_entries, buffer = self.get_first_page()
+
+        if n_entries == 0 or buffer is None:
             return
 
-        # Navigate from the root to the first leaf page
-        page_index = self.header.root_page
-        for _ in range(1, self.header.n_levels):
-            page = self.pages[page_index]
-            unknown, n_entries, prev_page = struct.unpack("<hhh", page[:6])
-            index_header = BTreeIndexHeader(
-                unknown=unknown, n_entries=n_entries, previous_page=prev_page, raw_data={"raw": page[:6], "parsed": {}}
-            )
-            page_index = index_header.previous_page
+        # Find the page index from current offset
+        page_idx = (buffer.current_offset - buffer.first_leaf - 8) // buffer.page_size
+        yield self.pages[page_idx], n_entries
 
-        # Iterate through the doubly-linked list of leaf pages
-        while page_index != -1:
-            yield self.pages[page_index]
-            node_header_data = self.pages[page_index][:8]
-            unknown, n_entries, prev_page, next_page = struct.unpack("<hhhh", node_header_data)
-            node_header = BTreeNodeHeader(
-                unknown=unknown,
-                n_entries=n_entries,
-                previous_page=prev_page,
-                next_page=next_page,
-                raw_data={"raw": node_header_data, "parsed": {}},
-            )
-            page_index = node_header.next_page
+        while True:
+            # Store current page index before getting next
+            current_page_idx = buffer.next_page
+            n_entries = self.get_next_page(buffer)
+
+            if n_entries == 0:
+                break
+
+            yield self.pages[current_page_idx], n_entries
