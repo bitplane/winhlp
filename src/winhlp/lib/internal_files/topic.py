@@ -1856,63 +1856,47 @@ class TopicFile(InternalFile):
         while i < len(raw_content):
             byte_value = raw_content[i]
 
-            # Font and formatting commands (0x80-0x8C range)
-            if byte_value == 0x80:  # Bold on
-                finish_current_span()
-                current_formatting["bold"] = True
-                i += 1
-                continue
-            elif byte_value == 0x81:  # Bold off
-                finish_current_span()
-                current_formatting["bold"] = False
-                i += 1
-                continue
-            elif byte_value == 0x82:  # Italic on
-                finish_current_span()
-                current_formatting["italic"] = True
-                i += 1
-                continue
-            elif byte_value == 0x83:  # Italic off
-                finish_current_span()
-                current_formatting["italic"] = False
-                i += 1
-                continue
-            elif byte_value == 0x84:  # Underline on
-                finish_current_span()
-                current_formatting["underline"] = True
-                i += 1
-                continue
-            elif byte_value == 0x85:  # Underline off
-                finish_current_span()
-                current_formatting["underline"] = False
-                i += 1
-                continue
-            elif byte_value == 0x8A:  # Strikethrough on
-                finish_current_span()
-                current_formatting["strikethrough"] = True
-                i += 1
-                continue
-            elif byte_value == 0x8B:  # Strikethrough off
-                finish_current_span()
-                current_formatting["strikethrough"] = False
-                i += 1
-                continue
-            elif byte_value == 0x8C:  # Superscript/subscript toggle
+            # Special character and command codes (0x80-0x8C range)
+            if byte_value == 0x80:  # Font change
                 finish_current_span()
                 if i + 1 < len(raw_content):
-                    next_byte = raw_content[i + 1]
-                    if next_byte == 0x01:  # Superscript
-                        current_formatting["superscript"] = True
-                        current_formatting["subscript"] = False
-                    elif next_byte == 0x02:  # Subscript
-                        current_formatting["superscript"] = False
-                        current_formatting["subscript"] = True
-                    else:  # Normal
-                        current_formatting["superscript"] = False
-                        current_formatting["subscript"] = False
+                    font_number = raw_content[i + 1]
+                    current_font = font_number  # Index into font table
                     i += 2
                 else:
                     i += 1
+                continue
+            elif byte_value == 0x81:  # Line break
+                finish_current_span()
+                current_text_bytes.extend(b"\n")
+                i += 1
+                continue
+            elif byte_value == 0x82:  # End of paragraph
+                finish_current_span()
+                current_text_bytes.extend(b"\n\n")
+                i += 1
+                continue
+            elif byte_value == 0x83:  # TAB
+                finish_current_span()
+                current_text_bytes.extend(b"\t")
+                i += 1
+                continue
+            elif byte_value == 0x89:  # End of hotspot
+                finish_current_span()
+                current_formatting["hyperlink"] = False
+                current_formatting["hyperlink_target"] = None
+                hotspot_active = False
+                i += 1
+                continue
+            elif byte_value == 0x8B:  # Non-break space
+                finish_current_span()
+                current_text_bytes.extend(b" ")
+                i += 1
+                continue
+            elif byte_value == 0x8C:  # Non-break hyphen
+                finish_current_span()
+                current_text_bytes.extend(b"-")
+                i += 1
                 continue
 
             # Jump commands (0x86-0x88 range)
