@@ -147,6 +147,8 @@ class HelpFile(BaseModel):
         system_offset = self.directory.files["|SYSTEM"]
         # We need to read the file header to know the size of the |SYSTEM file
         file_header_data = self.data[system_offset : system_offset + 9]
+        if len(file_header_data) < 9:
+            return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         system_data = self.data[system_offset + 9 : system_offset + 9 + used_space]
@@ -162,6 +164,8 @@ class HelpFile(BaseModel):
         font_offset = self.directory.files["|FONT"]
         # We need to read the file header to know the size of the |FONT file
         file_header_data = self.data[font_offset : font_offset + 9]
+        if len(file_header_data) < 9:
+            return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         font_data = self.data[font_offset + 9 : font_offset + 9 + used_space]
@@ -177,6 +181,8 @@ class HelpFile(BaseModel):
         topic_offset = self.directory.files["|TOPIC"]
         # We need to read the file header to know the size of the |TOPIC file
         file_header_data = self.data[topic_offset : topic_offset + 9]
+        if len(file_header_data) < 9:
+            return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         topic_data = self.data[topic_offset + 9 : topic_offset + 9 + used_space]
@@ -192,6 +198,8 @@ class HelpFile(BaseModel):
         context_offset = self.directory.files["|CONTEXT"]
         # We need to read the file header to know the size of the |CONTEXT file
         file_header_data = self.data[context_offset : context_offset + 9]
+        if len(file_header_data) < 9:
+            return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         context_data = self.data[context_offset + 9 : context_offset + 9 + used_space]
@@ -207,6 +215,8 @@ class HelpFile(BaseModel):
         phrase_offset = self.directory.files["|PHRASE"]
         # We need to read the file header to know the size of the |PHRASE file
         file_header_data = self.data[phrase_offset : phrase_offset + 9]
+        if len(file_header_data) < 9:
+            return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         phrase_data = self.data[phrase_offset + 9 : phrase_offset + 9 + used_space]
@@ -222,6 +232,8 @@ class HelpFile(BaseModel):
         ctxomap_offset = self.directory.files["|CTXOMAP"]
         # We need to read the file header to know the size of the |CTXOMAP file
         file_header_data = self.data[ctxomap_offset : ctxomap_offset + 9]
+        if len(file_header_data) < 9:
+            return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         ctxomap_data = self.data[ctxomap_offset + 9 : ctxomap_offset + 9 + used_space]
@@ -237,6 +249,8 @@ class HelpFile(BaseModel):
         catalog_offset = self.directory.files["|CATALOG"]
         # We need to read the file header to know the size of the |CATALOG file
         file_header_data = self.data[catalog_offset : catalog_offset + 9]
+        if len(file_header_data) < 9:
+            return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         catalog_data = self.data[catalog_offset + 9 : catalog_offset + 9 + used_space]
@@ -252,6 +266,8 @@ class HelpFile(BaseModel):
         viola_offset = self.directory.files["|VIOLA"]
         # We need to read the file header to know the size of the |VIOLA file
         file_header_data = self.data[viola_offset : viola_offset + 9]
+        if len(file_header_data) < 9:
+            return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         viola_data = self.data[viola_offset + 9 : viola_offset + 9 + used_space]
@@ -267,6 +283,8 @@ class HelpFile(BaseModel):
         gmacros_offset = self.directory.files["|GMACROS"]
         # We need to read the file header to know the size of the |GMACROS file
         file_header_data = self.data[gmacros_offset : gmacros_offset + 9]
+        if len(file_header_data) < 9:
+            return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         gmacros_data = self.data[gmacros_offset + 9 : gmacros_offset + 9 + used_space]
@@ -282,6 +300,8 @@ class HelpFile(BaseModel):
         phrindex_offset = self.directory.files["|PhrIndex"]
         # We need to read the file header to know the size of the |PhrIndex file
         file_header_data = self.data[phrindex_offset : phrindex_offset + 9]
+        if len(file_header_data) < 9:
+            return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         phrindex_data = self.data[phrindex_offset + 9 : phrindex_offset + 9 + used_space]

@@ -96,15 +96,16 @@ def main():
         print(f"Error: Path '{search_path}' does not exist")
         sys.exit(1)
 
-    # Set up error directory
+    # Set up error directory with atomic operation
     script_dir = Path(__file__).parent
     project_root = script_dir.parent
     error_dir = project_root / "tests" / "data" / "errors"
+    error_dir_new = project_root / "tests" / "data" / "errors.new"
 
-    # Clean and recreate error directory
-    if error_dir.exists():
-        shutil.rmtree(error_dir)
-    error_dir.mkdir(parents=True, exist_ok=True)
+    # Create new directory (clean slate)
+    if error_dir_new.exists():
+        shutil.rmtree(error_dir_new)
+    error_dir_new.mkdir(parents=True, exist_ok=True)
 
     print(f"Searching for HLP files in: {search_path}")
     hlp_files = collect_hlp_files(search_path)
@@ -158,7 +159,7 @@ def main():
         print(f"\nError: {signature}")
         print(f"  Example file: {basename}")
         print(f"  Total files with this error: {len(files)}")
-        print(f"  Copied to: {dst_file.relative_to(project_root)}")
+        print(f"  Will copy to: {basename}")
 
     print(f"\nError files copied to: {error_dir.relative_to(project_root)}")
 

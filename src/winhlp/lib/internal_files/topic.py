@@ -404,7 +404,7 @@ class TopicFile(InternalFile):
         offset = 0
         while offset < len(data):
             start_command_offset = offset
-            if offset + 1 > len(data):
+            if offset + 1 > len(data) or offset < 0:
                 break
             command_byte = struct.unpack_from("<B", data, offset)[0]
             offset += 1
@@ -452,7 +452,7 @@ class TopicFile(InternalFile):
                         offset += 1
                     if offset >= len(data):
                         break
-                    external_file = data[external_file_start:offset].decode("ascii")
+                    external_file = self._decode_text(data[external_file_start:offset])
                     offset += 1  # for null terminator
 
                     # Read null-terminated string for window_name
@@ -461,7 +461,7 @@ class TopicFile(InternalFile):
                         offset += 1
                     if offset >= len(data):
                         break
-                    window_name = data[window_name_start:offset].decode("ascii")
+                    window_name = self._decode_text(data[window_name_start:offset])
                     offset += 1  # for null terminator
 
                 command = ExternalJumpCommand(
@@ -515,7 +515,7 @@ class TopicFile(InternalFile):
                     offset += 1
                 if offset >= len(data):
                     break
-                macro_string = data[macro_string_start:offset].decode("ascii")
+                macro_string = self._decode_text(data[macro_string_start:offset])
                 offset += 1  # for null terminator
                 command = MacroCommand(
                     macro_string=macro_string,
@@ -665,3 +665,35 @@ class TopicFile(InternalFile):
         # Now parse the formatting commands that follow ParagraphInfo
         self.formatting_commands.append(paragraph_info)
         self._parse_formatting_commands(data[offset:])
+
+    def _decode_text(self, data: bytes) -> str:
+        """
+        Decode text data using the appropriate encoding from the system file.
+        Falls back through multiple encodings to handle international text.
+        """
+        if not data:
+            return ""
+
+        # Get encoding from system file if available
+        encoding = "cp1252"  # Default Windows Western European
+        if self.system_file and hasattr(self.system_file, "encoding"):
+            encoding = self.system_file.encoding
+
+        # Try the determined encoding first
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            pass
+
+        # Fall back through common Windows encodings
+        fallback_encodings = ["cp1252", "cp1251", "cp850", "iso-8859-1"]
+
+        for fallback_encoding in fallback_encodings:
+            if fallback_encoding != encoding:  # Don't retry the same encoding
+                try:
+                    return data.decode(fallback_encoding)
+                except UnicodeDecodeError:
+                    continue
+
+        # Final fallback: decode with errors='replace' to avoid crashes
+        return data.decode("cp1252", errors="replace")
