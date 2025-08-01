@@ -8,6 +8,7 @@ from .internal_files.font import FontFile
 from .internal_files.topic import TopicFile
 from .internal_files.context import ContextFile
 from .internal_files.phrase import PhraseFile
+from .internal_files.ctxomap import CtxoMapFile
 from .exceptions import InvalidHLPFileError
 import struct
 
@@ -42,6 +43,7 @@ class HelpFile(BaseModel):
     topic: Optional[TopicFile] = None
     context: Optional[ContextFile] = None
     phrase: Optional[PhraseFile] = None
+    ctxomap: Optional[CtxoMapFile] = None
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
@@ -60,6 +62,7 @@ class HelpFile(BaseModel):
         self.topic = self._parse_topic()
         self.context = self._parse_context()
         self.phrase = self._parse_phrase()
+        self.ctxomap = self._parse_ctxomap()
 
     def _parse_header(self) -> HLPHeader:
         """
@@ -191,3 +194,18 @@ class HelpFile(BaseModel):
 
         phrase_data = self.data[phrase_offset + 9 : phrase_offset + 9 + used_space]
         return PhraseFile(filename="|PHRASE", raw_data=phrase_data)
+
+    def _parse_ctxomap(self) -> CtxoMapFile:
+        """
+        Parses the |CTXOMAP internal file.
+        """
+        if "|CTXOMAP" not in self.directory.files:
+            return None
+
+        ctxomap_offset = self.directory.files["|CTXOMAP"]
+        # We need to read the file header to know the size of the |CTXOMAP file
+        file_header_data = self.data[ctxomap_offset : ctxomap_offset + 9]
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        ctxomap_data = self.data[ctxomap_offset + 9 : ctxomap_offset + 9 + used_space]
+        return CtxoMapFile(filename="|CTXOMAP", raw_data=ctxomap_data)

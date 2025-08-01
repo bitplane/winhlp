@@ -5,7 +5,6 @@ from pydantic import BaseModel
 from typing import List, Any, Optional
 import struct
 from ..compression import lz77_decompress
-from ..picture import Picture
 
 
 class TopicBlockHeader(BaseModel):
@@ -265,11 +264,26 @@ class TopicFile(InternalFile):
         """
         offset = 0
         while offset < len(block_data):
-            raw_bytes = block_data[offset : offset + 19]
-            if len(raw_bytes) < 19:
-                break
-
-            block_size, data_len2, prev_block, next_block, data_len1, record_type = struct.unpack("<llllHb", raw_bytes)
+            # Check which structure format to use based on the file version
+            # The confusion comes from different sizes in Win 3.0 vs 3.1
+            if self.system_file and self.system_file.header.minor <= 16:
+                # Win 3.0 uses smaller structure
+                raw_bytes = block_data[offset : offset + 19]
+                if len(raw_bytes) < 19:
+                    break
+                block_size, data_len2, prev_block, next_block, data_len1, record_type = struct.unpack(
+                    "<llllHb", raw_bytes
+                )
+                link_offset = 19
+            else:
+                # Win 3.1+ uses full 21-byte structure
+                raw_bytes = block_data[offset : offset + 21]
+                if len(raw_bytes) < 21:
+                    break
+                block_size, data_len2, prev_block, next_block, data_len1, record_type = struct.unpack(
+                    "<LLLLLb", raw_bytes
+                )
+                link_offset = 21
 
             parsed_link = {
                 "block_size": block_size,
@@ -282,8 +296,13 @@ class TopicFile(InternalFile):
 
             link = TopicLink(**parsed_link, raw_data={"raw": raw_bytes, "parsed": parsed_link})
 
-            link_data1 = block_data[offset + 21 : offset + 21 + data_len1]
-            link_data2 = block_data[offset + 21 + data_len1 : offset + block_size]
+            # DataLen1 includes the size of TOPICLINK in Win 3.1+
+            if self.system_file and self.system_file.header.minor <= 16:
+                link_data1 = block_data[offset + link_offset : offset + link_offset + data_len1]
+                link_data2 = block_data[offset + link_offset + data_len1 : offset + block_size]
+            else:
+                link_data1 = block_data[offset + link_offset : offset + data_len1]
+                link_data2 = block_data[offset + data_len1 : offset + block_size]
 
             self._parse_link_data(link, link_data1, link_data2)
 
@@ -440,8 +459,8 @@ class TopicFile(InternalFile):
                     },
                 )
                 self.formatting_commands.append(command)
-                # Parse the picture data using the Picture class (validates structure)
-                Picture(data=picture_data)
+                # TODO: Parse the picture data using the Picture class (validates structure)
+                # Picture(data=picture_data)
             elif command_byte == 0x05:  # MacroCommand
                 macro_string_start = offset
                 while data[offset] != 0x00:
@@ -546,18 +565,25 @@ class TopicFile(InternalFile):
             )
 
         if bits.tabinfo_follows:
-            number_of_tab_stops = struct.unpack_from("<H", data, offset)[0]
-            offset += 2
-            tabs = []
-            for _ in range(number_of_tab_stops):
-                tab_stop = struct.unpack_from("<H", data, offset)[0]
+            if offset + 2 <= len(data):
+                number_of_tab_stops = struct.unpack_from("<H", data, offset)[0]
                 offset += 2
-                tab_type = 0
-                if tab_stop & 0x4000:
-                    tab_type = struct.unpack_from("<H", data, offset)[0]
+                tabs = []
+                for _ in range(number_of_tab_stops):
+                    if offset + 2 > len(data):
+                        break
+                    tab_stop = struct.unpack_from("<H", data, offset)[0]
                     offset += 2
-                tabs.append(Tab(position=tab_stop & 0x3FFF, tab_type=tab_type))
-            tab_info = TabInfo(number_of_tab_stops=number_of_tab_stops, tabs=tabs)
+                    tab_type = 0
+                    if tab_stop & 0x4000:
+                        if offset + 2 <= len(data):
+                            tab_type = struct.unpack_from("<H", data, offset)[0]
+                            offset += 2
+                        else:
+                            # Not enough data for tab type
+                            pass
+                    tabs.append(Tab(position=tab_stop & 0x3FFF, tab_type=tab_type))
+                tab_info = TabInfo(number_of_tab_stops=len(tabs), tabs=tabs)
 
         parsed_paragraph_info = {
             "topic_size": topic_size,
