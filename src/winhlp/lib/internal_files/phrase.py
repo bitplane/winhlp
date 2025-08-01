@@ -1,190 +1,165 @@
-"""Parser for the |PHRASE internal file."""
+"""Parser for the |Phrases internal file."""
 
 from .base import InternalFile
-from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any
 from ..compression import lz77_decompress
 import struct
 
 
-class PhraseHeader30(BaseModel):
-    """
-    Header for Windows 3.0 |PHRASE file.
-    From `helpfile.md`.
-    """
-
-    num_phrases: int
-    one_hundred: int  # Should be 0x0100
-    phrase_offsets: List[int]
-    raw_data: dict
-
-
-class PhraseHeader31(BaseModel):
-    """
-    Header for Windows 3.1+ |PHRASE file.
-    From `helpfile.md`.
-    """
-
-    num_phrases: int
-    one_hundred: int  # Should be 0x0100
-    decompressed_size: int
-    phrase_offsets: List[int]
-    raw_data: dict
-
-
 class PhraseFile(InternalFile):
     """
-    Parses the |PHRASE file, which contains phrase compression tables.
+    Parses the |Phrases file, which contains phrase compression tables.
 
-    From helpfile.md:
-    If the help file is phrase compressed, it contains an internal file named
-    |Phrases. Windows 3.0 help files generated with HC30 use uncompressed structure.
-    Windows 3.1 help files generated using HC31 and later always LZ77 compress
-    the Phrase character array.
+    Based on helldeco.c PhraseLoad function:
+    - Read PhraseCount as WORD
+    - Check for special VC4.0 format (PhraseCount == 0x0800)
+    - Read magic number (must be 0x0100)
+    - Read phrase offsets as WORDs
+    - Decompress phrase data using LZ77 (WinHelp 3.1+) or uncompressed (WinHelp 3.0)
     """
 
-    header: Optional[PhraseHeader30 | PhraseHeader31] = None
+    phrase_count: int = 0
     phrases: List[str] = []
-    is_compressed: bool = False
+    is_new_format: bool = False  # VC4.0 MSDEV format
+    system_file: Any = None
 
-    def __init__(self, **data):
+    def __init__(self, system_file: Any = None, **data):
         super().__init__(**data)
+        self.system_file = system_file
+        self.phrases = []  # Initialize as instance variable
         self._parse()
 
     def _parse(self):
         """
-        Parses the |PHRASE file data.
+        Parses the |Phrases file data following helldeco.c logic exactly.
         """
-        if len(self.raw_data) < 4:
+        if len(self.raw_data) < 6:  # Need at least count + magic
             return
 
-        self._parse_header()
-        self._parse_phrases()
+        offset = 0
 
-    def _parse_header(self):
-        """
-        Parses the phrase file header.
-        """
-        # Read the first 4 bytes to determine format
-        num_phrases, one_hundred = struct.unpack("<HH", self.raw_data[:4])
+        # Read PhraseCount as WORD
+        self.phrase_count = struct.unpack_from("<H", self.raw_data, offset)[0]
+        offset += 2
 
-        if len(self.raw_data) >= 10:
-            # Check if this might be a WinHelp 3.1+ format with decompressed_size
-            potential_decompressed_size = struct.unpack("<l", self.raw_data[4:8])[0]
-
-            # If decompressed_size looks reasonable and we have enough data, assume 3.1+ format
-            if potential_decompressed_size > 0 and potential_decompressed_size < 1000000:
-                self.is_compressed = True
-                decompressed_size = potential_decompressed_size
-
-                # Read phrase offsets
-                phrase_offsets = []
-                offset = 8
-                for i in range(num_phrases + 1):
-                    if offset + 2 > len(self.raw_data):
-                        break
-                    phrase_offset = struct.unpack("<H", self.raw_data[offset : offset + 2])[0]
-                    phrase_offsets.append(phrase_offset)
-                    offset += 2
-
-                parsed_header = {
-                    "num_phrases": num_phrases,
-                    "one_hundred": one_hundred,
-                    "decompressed_size": decompressed_size,
-                    "phrase_offsets": phrase_offsets,
-                }
-
-                self.header = PhraseHeader31(
-                    **parsed_header, raw_data={"raw": self.raw_data[:offset], "parsed": parsed_header}
-                )
-            else:
-                self._parse_header_30(num_phrases, one_hundred)
-        else:
-            self._parse_header_30(num_phrases, one_hundred)
-
-    def _parse_header_30(self, num_phrases: int, one_hundred: int):
-        """
-        Parses Windows 3.0 format header.
-        """
-        # Read phrase offsets
-        phrase_offsets = []
-        offset = 4
-        for i in range(num_phrases + 1):
+        # Check for special VC4.0 format: MSDEV\HELP\MSDEV40.MVB
+        self.is_new_format = self.phrase_count == 0x0800
+        if self.is_new_format:
+            # Read real PhraseCount
             if offset + 2 > len(self.raw_data):
-                break
-            phrase_offset = struct.unpack("<H", self.raw_data[offset : offset + 2])[0]
-            phrase_offsets.append(phrase_offset)
+                return
+            self.phrase_count = struct.unpack_from("<H", self.raw_data, offset)[0]
             offset += 2
 
-        parsed_header = {
-            "num_phrases": num_phrases,
-            "one_hundred": one_hundred,
-            "phrase_offsets": phrase_offsets,
-        }
+        # Validate magic number (must be 0x0100)
+        if offset + 2 > len(self.raw_data):
+            return
+        magic = struct.unpack_from("<H", self.raw_data, offset)[0]
+        offset += 2
 
-        self.header = PhraseHeader30(**parsed_header, raw_data={"raw": self.raw_data[:offset], "parsed": parsed_header})
-
-    def _parse_phrases(self):
-        """
-        Parses the phrase strings.
-        """
-        if not self.header or not self.header.phrase_offsets:
+        if magic != 0x0100:
+            # Unknown |Phrases file structure - abort parsing
             return
 
-        if self.is_compressed and isinstance(self.header, PhraseHeader31):
-            self._parse_phrases_compressed()
+        if self.phrase_count == 0:
+            return
+
+        # Determine version from system file
+        before31 = True
+        if self.system_file and hasattr(self.system_file, "header"):
+            before31 = self.system_file.header.minor < 16
+
+        # Calculate phrase data parameters
+        if before31:
+            # Windows 3.0: uncompressed
+            phrase_offsets_size = (self.phrase_count + 1) * 2  # WORDs
+            phrase_data_start = offset + phrase_offsets_size
+            phrase_data_length = len(self.raw_data) - phrase_data_start
+            decompressed_size = phrase_data_length
         else:
-            self._parse_phrases_uncompressed()
+            # Windows 3.1+: LZ77 compressed
+            # Read decompressed size as DWORD
+            if offset + 4 > len(self.raw_data):
+                return
+            decompressed_size = struct.unpack_from("<L", self.raw_data, offset)[0]
+            offset += 4
 
-    def _parse_phrases_uncompressed(self):
-        """
-        Parses uncompressed phrases (Windows 3.0 format).
-        """
-        if not isinstance(self.header, PhraseHeader30):
+            phrase_offsets_size = (self.phrase_count + 1) * 2  # WORDs
+            phrase_data_start = offset + phrase_offsets_size
+            phrase_data_length = len(self.raw_data) - phrase_data_start
+
+        # Read phrase offsets
+        phrase_offsets = []
+        base_offset = phrase_offsets_size + (0 if before31 else 4)  # Adjust for decompressed_size field
+
+        for i in range(self.phrase_count + 1):
+            if offset + 2 > len(self.raw_data):
+                break
+            phrase_offset = struct.unpack_from("<H", self.raw_data, offset)[0]
+            phrase_offsets.append(phrase_offset - base_offset)  # Adjust relative to phrase data start
+            offset += 2
+
+        if len(phrase_offsets) < self.phrase_count + 1:
             return
 
-        # Calculate offset to phrase data
-        phrase_data_offset = 4 + 2 * (self.header.num_phrases + 1)
-        phrase_data = self.raw_data[phrase_data_offset:]
+        # Read and process phrase data
+        phrase_data_raw = self.raw_data[phrase_data_start:]
 
-        # Extract each phrase using the offsets
-        for i in range(self.header.num_phrases):
-            start_offset = self.header.phrase_offsets[i] - self.header.phrase_offsets[0]
-            end_offset = self.header.phrase_offsets[i + 1] - self.header.phrase_offsets[0]
+        if before31:
+            # No decompression needed
+            phrase_data = phrase_data_raw
+        else:
+            # LZ77 decompression (method 2)
+            try:
+                phrase_data = lz77_decompress(phrase_data_raw)
+            except Exception:
+                # If decompression fails, treat as uncompressed
+                phrase_data = phrase_data_raw
+
+        # Extract individual phrases
+        for i in range(self.phrase_count):
+            start_offset = phrase_offsets[i]
+            end_offset = phrase_offsets[i + 1]
 
             if start_offset >= 0 and end_offset <= len(phrase_data) and start_offset < end_offset:
                 phrase_bytes = phrase_data[start_offset:end_offset]
-                # Phrases are not null-terminated, use the offset difference for length
-                phrase = phrase_bytes.decode("latin-1", errors="ignore")
+                # Decode using appropriate encoding from system file
+                phrase = self._decode_text(phrase_bytes)
                 self.phrases.append(phrase)
+            else:
+                self.phrases.append("")  # Invalid phrase
 
-    def _parse_phrases_compressed(self):
+    def _decode_text(self, data: bytes) -> str:
         """
-        Parses LZ77 compressed phrases (Windows 3.1+ format).
+        Decode text data using the appropriate encoding from the system file.
+        Falls back through multiple encodings to handle international text.
         """
-        if not isinstance(self.header, PhraseHeader31):
-            return
+        if not data:
+            return ""
 
-        # Calculate offset to compressed phrase data
-        phrase_data_offset = 8 + 2 * (self.header.num_phrases + 1)
-        compressed_data = self.raw_data[phrase_data_offset:]
+        # Get encoding from system file if available
+        encoding = "cp1252"  # Default Windows Western European
+        if self.system_file and hasattr(self.system_file, "encoding"):
+            encoding = self.system_file.encoding
 
-        # Decompress the phrase data
+        # Try the determined encoding first
         try:
-            decompressed_data = lz77_decompress(compressed_data)
-        except Exception:
-            # If decompression fails, fall back to treating as uncompressed
-            decompressed_data = compressed_data
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            pass
 
-        # Extract each phrase using the offsets
-        for i in range(self.header.num_phrases):
-            start_offset = self.header.phrase_offsets[i] - self.header.phrase_offsets[0]
-            end_offset = self.header.phrase_offsets[i + 1] - self.header.phrase_offsets[0]
+        # Fall back through common Windows encodings
+        fallback_encodings = ["cp1252", "cp1251", "cp850", "iso-8859-1"]
 
-            if start_offset >= 0 and end_offset <= len(decompressed_data) and start_offset < end_offset:
-                phrase_bytes = decompressed_data[start_offset:end_offset]
-                phrase = phrase_bytes.decode("latin-1", errors="ignore")
-                self.phrases.append(phrase)
+        for fallback_encoding in fallback_encodings:
+            if fallback_encoding != encoding:  # Don't retry the same encoding
+                try:
+                    return data.decode(fallback_encoding)
+                except UnicodeDecodeError:
+                    continue
+
+        # Final fallback: decode with errors='replace' to avoid crashes
+        return data.decode("cp1252", errors="replace")
 
     def get_phrase(self, phrase_number: int) -> Optional[str]:
         """

@@ -207,20 +207,20 @@ class HelpFile(BaseModel):
 
     def _parse_phrase(self) -> PhraseFile:
         """
-        Parses the |PHRASE internal file.
+        Parses the |Phrases internal file.
         """
-        if "|PHRASE" not in self.directory.files:
+        if "|Phrases" not in self.directory.files:
             return None
 
-        phrase_offset = self.directory.files["|PHRASE"]
-        # We need to read the file header to know the size of the |PHRASE file
+        phrase_offset = self.directory.files["|Phrases"]
+        # We need to read the file header to know the size of the |Phrases file
         file_header_data = self.data[phrase_offset : phrase_offset + 9]
         if len(file_header_data) < 9:
             return None
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
         phrase_data = self.data[phrase_offset + 9 : phrase_offset + 9 + used_space]
-        return PhraseFile(filename="|PHRASE", raw_data=phrase_data)
+        return PhraseFile(filename="|Phrases", raw_data=phrase_data, system_file=self.system)
 
     def _parse_ctxomap(self) -> CtxoMapFile:
         """
