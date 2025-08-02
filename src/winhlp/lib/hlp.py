@@ -1,7 +1,7 @@
 """Main HLP file reader class."""
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from .directory import Directory
 from .internal_files.system import SystemFile
 from .internal_files.font import FontFile
@@ -13,6 +13,12 @@ from .internal_files.catalog import CatalogFile
 from .internal_files.viola import ViolaFile
 from .internal_files.gmacros import GMacrosFile
 from .internal_files.phrindex import PhrIndexFile
+from .internal_files.phrimage import PhrImageFile
+from .internal_files.topicid import TopicIdFile
+from .internal_files.ttlbtree import TTLBTreeFile
+from .internal_files.xwbtree import XWBTreeFile
+from .internal_files.xwdata import XWDataFile
+from .internal_files.xwmap import XWMapFile
 from .internal_files.bitmap import BitmapFile
 from .internal_files.tomap import ToMapFile
 from .exceptions import InvalidHLPFileError
@@ -54,8 +60,14 @@ class HelpFile(BaseModel):
     viola: Optional[ViolaFile] = None
     gmacros: Optional[GMacrosFile] = None
     phrindex: Optional[PhrIndexFile] = None
+    phrimage: Optional[PhrImageFile] = None
+    topicid: Optional[TopicIdFile] = None
+    ttlbtree: Optional[TTLBTreeFile] = None
     tomap: Optional[ToMapFile] = None
     bitmaps: Dict[str, BitmapFile] = {}
+    keyword_search_files: Dict[
+        str, Dict[str, Any]
+    ] = {}  # Maps 'A' -> {'btree': XWBTreeFile, 'data': XWDataFile, 'map': XWMapFile}
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
@@ -173,6 +185,10 @@ class HelpFile(BaseModel):
         self.viola = self._parse_viola()
         self.gmacros = self._parse_gmacros()
         self.phrindex = self._parse_phrindex()
+        self.phrimage = self._parse_phrimage()
+        self.topicid = self._parse_topicid()
+        self.ttlbtree = self._parse_ttlbtree()
+        self.keyword_search_files = self._parse_keyword_search_files()
         self.bitmaps = self._parse_bitmaps()
 
     def _parse_header(self) -> HLPHeader:
@@ -423,6 +439,59 @@ class HelpFile(BaseModel):
         phrindex_data = self.data[phrindex_offset + 9 : phrindex_offset + 9 + used_space]
         return PhrIndexFile(filename="|PhrIndex", raw_data=phrindex_data, system_file=self.system)
 
+    def _parse_phrimage(self) -> PhrImageFile:
+        """
+        Parses the |PhrImage internal file.
+        """
+        if "|PhrImage" not in self.directory.files:
+            return None
+
+        phrimage_offset = self.directory.files["|PhrImage"]
+        # We need to read the file header to know the size of the |PhrImage file
+        file_header_data = self.data[phrimage_offset : phrimage_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        phrimage_data = self.data[phrimage_offset : phrimage_offset + 9 + used_space]
+        return PhrImageFile(
+            filename="|PhrImage", raw_data=phrimage_data, system_file=self.system, phr_index_file=self.phrindex
+        )
+
+    def _parse_topicid(self) -> TopicIdFile:
+        """
+        Parses the |TopicId internal file.
+        """
+        if "|TopicId" not in self.directory.files:
+            return None
+
+        topicid_offset = self.directory.files["|TopicId"]
+        # We need to read the file header to know the size of the |TopicId file
+        file_header_data = self.data[topicid_offset : topicid_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        topicid_data = self.data[topicid_offset : topicid_offset + 9 + used_space]
+        return TopicIdFile(filename="|TopicId", raw_data=topicid_data)
+
+    def _parse_ttlbtree(self) -> TTLBTreeFile:
+        """
+        Parses the |TTLBTREE internal file.
+        """
+        if "|TTLBTREE" not in self.directory.files:
+            return None
+
+        ttlbtree_offset = self.directory.files["|TTLBTREE"]
+        # We need to read the file header to know the size of the |TTLBTREE file
+        file_header_data = self.data[ttlbtree_offset : ttlbtree_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        ttlbtree_data = self.data[ttlbtree_offset : ttlbtree_offset + 9 + used_space]
+        return TTLBTreeFile(filename="|TTLBTREE", raw_data=ttlbtree_data)
+
     def _parse_bitmaps(self) -> Dict[str, BitmapFile]:
         """
         Parses all bitmap files (|bm0, |bm1, |bm2, etc.) in the directory.
@@ -451,3 +520,166 @@ class HelpFile(BaseModel):
                         continue
 
         return bitmaps
+
+    def _parse_keyword_search_files(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Parses all keyword search files (|xWBTREE, |xWDATA, |xWMAP) where x is A-Z, a-z.
+        """
+        keyword_files = {}
+
+        # Check for all possible keyword search file sets (A-Z, a-z)
+        for char_code in range(ord("A"), ord("Z") + 1):
+            char = chr(char_code)
+            keyword_files.update(self._parse_keyword_search_set(char))
+
+        for char_code in range(ord("a"), ord("z") + 1):
+            char = chr(char_code)
+            keyword_files.update(self._parse_keyword_search_set(char))
+
+        return keyword_files
+
+    def _parse_keyword_search_set(self, char: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Parse a complete keyword search set for a given character.
+
+        Args:
+            char: The character identifier (A-Z, a-z)
+
+        Returns:
+            Dictionary mapping char to parsed files, or empty dict if files don't exist
+        """
+        btree_name = f"|{char}WBTREE"
+        data_name = f"|{char}WDATA"
+        map_name = f"|{char}WMAP"
+
+        # Check if all three files exist
+        if (
+            btree_name not in self.directory.files
+            or data_name not in self.directory.files
+            or map_name not in self.directory.files
+        ):
+            return {}
+
+        try:
+            # Parse |xWBTREE file
+            btree_offset = self.directory.files[btree_name]
+            file_header_data = self.data[btree_offset : btree_offset + 9]
+            if len(file_header_data) < 9:
+                return {}
+            reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+            btree_data = self.data[btree_offset : btree_offset + 9 + used_space]
+            btree_file = XWBTreeFile(filename=btree_name, raw_data=btree_data)
+
+            # Parse |xWDATA file
+            data_offset = self.directory.files[data_name]
+            file_header_data = self.data[data_offset : data_offset + 9]
+            if len(file_header_data) < 9:
+                return {}
+            reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+            data_data = self.data[data_offset : data_offset + 9 + used_space]
+            data_file = XWDataFile(filename=data_name, raw_data=data_data)
+
+            # Parse |xWMAP file
+            map_offset = self.directory.files[map_name]
+            file_header_data = self.data[map_offset : map_offset + 9]
+            if len(file_header_data) < 9:
+                return {}
+            reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+            map_data = self.data[map_offset : map_offset + 9 + used_space]
+            map_file = XWMapFile(filename=map_name, raw_data=map_data)
+
+            return {char: {"btree": btree_file, "data": data_file, "map": map_file}}
+
+        except (struct.error, IndexError):
+            # Skip malformed keyword search files
+            return {}
+
+    def search_keywords(self, char: str, keyword: str) -> List[int]:
+        """
+        Search for topic offsets associated with a keyword.
+
+        Args:
+            char: The character identifier (A-Z, a-z) for the keyword type
+            keyword: The keyword to search for
+
+        Returns:
+            List of topic offsets where the keyword appears
+        """
+        if char not in self.keyword_search_files:
+            return []
+
+        files = self.keyword_search_files[char]
+        btree_file = files["btree"]
+        data_file = files["data"]
+
+        # Get keyword info from btree
+        keyword_info = btree_file.get_keyword_info(keyword)
+        if not keyword_info:
+            return []
+
+        # For GID format, topic offsets are stored directly in btree
+        if btree_file.is_gid_format:
+            return btree_file.get_topic_offsets_for_keyword(keyword)
+
+        # For standard format, use data file with offset and count
+        if hasattr(keyword_info, "kw_data_offset") and hasattr(keyword_info, "count"):
+            return data_file.get_topic_offsets_range(keyword_info.kw_data_offset, keyword_info.count)
+
+        return []
+
+    def get_all_keywords(self, char: str) -> List[str]:
+        """
+        Get all keywords for a specific character type.
+
+        Args:
+            char: The character identifier (A-Z, a-z) for the keyword type
+
+        Returns:
+            List of all keywords for the character type
+        """
+        if char not in self.keyword_search_files:
+            return []
+
+        btree_file = self.keyword_search_files[char]["btree"]
+        return btree_file.get_all_keywords()
+
+    def get_keyword_search_statistics(self) -> Dict[str, Any]:
+        """
+        Get statistics about all keyword search files.
+
+        Returns:
+            Dictionary with keyword search statistics
+        """
+        stats = {
+            "available_characters": list(self.keyword_search_files.keys()),
+            "total_character_sets": len(self.keyword_search_files),
+            "character_stats": {},
+        }
+
+        total_keywords = 0
+        total_references = 0
+
+        for char, files in self.keyword_search_files.items():
+            btree_stats = files["btree"].get_statistics()
+            data_stats = files["data"].get_statistics()
+            map_stats = files["map"].get_statistics()
+
+            char_stats = {
+                "keywords": btree_stats["total_keywords"],
+                "references": btree_stats.get("total_references", 0),
+                "data_offsets": data_stats["total_offsets"],
+                "map_entries": map_stats["total_entries"],
+                "is_gid_format": btree_stats["is_gid_format"],
+            }
+
+            stats["character_stats"][char] = char_stats
+            total_keywords += char_stats["keywords"]
+            total_references += char_stats["references"]
+
+        stats["total_keywords"] = total_keywords
+        stats["total_references"] = total_references
+
+        return stats

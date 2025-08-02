@@ -4,26 +4,20 @@ Windows HLP file library for Python
 
 Based on helpdeco by Manfred Winterhoff, Ben Collver + Paul Wise
 
-## TODO
+## TODO / missing
 
-   6. Full RTF Output:
-       * C Version: The helpdeco tool is designed to output a comprehensive and accurate RTF representation of the
-         help file content, including all formatting and structural elements.
-       * Python Version: The ParsedTopic.get_rtf_content is a high-level RTF generator. While it handles basic
-         formatting and tables, it's likely less comprehensive and accurate in its RTF reconstruction compared to the
-         C tool, which aims for full fidelity.
+   1. Missing Internal Files: A large number of internal file types are not implemented at all.
+   2. `|SYSTEM` Divergences:
+       * Missing FTINDEX and LANGUAGE record parsers.
+       * Potentially incorrect WINDOW and DEFFONT parsing.
+   3. `|FONT` Divergences:
+       * Missing mvbfont and mvbstyle parsing.
+       * Potentially brittle NewStyle parsing.
+   4. `|TOPIC` Major Divergences:
+       * Incorrect Parsing Strategy: The lack of interleaved parsing of LinkData1 and LinkData2 is the most critical
+         flaw.
+       * Incomplete Table Support: RecordType 0x23 is not fully implemented.
+       * Potentially Flawed Compressed Integer Parsing: The compressed integer functions may not be fully correct.
+       * Incomplete `TOPICOFFSET` Handling: The logic for TOPICOFFSET is likely incomplete.
 
-Missing stuff:
-
-   * `|TOMAP`: (Win 3.0 topic number to position mapping)
-   * `|xWBTREE`, `|xWDATA`, `|xWMAP`: (Keyword B+ Trees for A-Z, a-z footnotes)
-   * `|TTLBTREE`: (Topic Title B+ Tree)
-   * `|CFn`: (Config macros for secondary windows)
-   * `|Rose`: (Macros from [MACROS] section)
-   * `|TopicId`: (ContextName assigned to topic offset)
-   * `|Petra`: (RTF source file names)
-   * `.GID` files and their internal structures (`|WinPos`, `|Pete`, `|Flags`, `|CntJump`, `|CntText`): (WinHlp32
-     specific files)
-   * `.GRP` files: (MediaView group files)
-   * `.CAC`, `.AUX` files: (Auxiliary files)
 
