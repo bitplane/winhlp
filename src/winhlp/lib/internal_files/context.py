@@ -500,6 +500,241 @@ class ContextFile(InternalFile):
         return f"CTX_{hash_value:08X}"
 
     @staticmethod
+    def derive_from_title(title: str, desired_hash: int, win95: bool = False) -> Optional[str]:
+        """
+        Attempts to derive a context ID from a topic title that matches the desired hash.
+
+        Based on the Derive() function from helpdeco.c.
+        Many authoring systems create context IDs from topic titles by:
+        - Replacing illegal characters with _ or . or leaving them out
+        - Using only part of the topic title
+        - Prefixing with idh_ or helpid_
+
+        Args:
+            title: The topic title to derive from
+            desired_hash: The hash value we're trying to match
+            win95: Whether to use Win95 character rules (allows more chars)
+
+        Returns:
+            A context ID that hashes to desired_hash, or None if not found
+        """
+        # Common prefixes used by authoring systems
+        prefixes = ["", "idh_", "helpid_"]
+        prefix_hashes = [0]
+        for prefix in prefixes[1:]:
+            prefix_hashes.append(ContextFile.calculate_hash(prefix))
+
+        # Create oldtable for Win 3.1 valid characters (more restrictive)
+        oldtable = [0] * 256
+        # Numbers
+        for i in range(9):
+            oldtable[ord("1") + i] = i + 1
+        oldtable[ord("0")] = 10
+        # Special chars
+        oldtable[ord(".")] = 12
+        oldtable[ord("_")] = 13
+        # Letters (case insensitive)
+        for i in range(26):
+            oldtable[ord("A") + i] = 17 + i
+            oldtable[ord("a") + i] = 17 + i
+
+        title_len = len(title)
+
+        # Try three strategies for handling illegal characters
+        strategies = []
+        if not win95:
+            strategies.append(1)  # Skip illegal chars
+        strategies.append(0)  # Win95 mode - allow all chars
+        if not win95:
+            strategies.append(2)  # Replace illegal chars with _
+
+        for strategy in strategies:
+            for prefix_idx, prefix in enumerate(prefixes):
+                k = 0  # Starting position in title
+
+                while k < title_len:
+                    hash_value = prefix_hashes[prefix_idx]
+                    buffer = prefix
+
+                    # Build candidate ID from title starting at position k
+                    for m in range(k, title_len):
+                        ch = title[m]
+                        ch_code = ord(ch)
+
+                        if strategy > 0:  # Win 3.1 mode
+                            if ch_code < 256:
+                                n = oldtable[ch_code]
+                            else:
+                                n = 0
+
+                            if n == 0:
+                                if strategy == 2:
+                                    # Replace illegal char with _
+                                    ch = "_"
+                                    n = oldtable[ord("_")]
+                                else:
+                                    # Skip illegal char
+                                    continue
+                        else:  # Win95 mode
+                            if ch_code < 256:
+                                n = ContextFile._get_hash_table_value(ch_code)
+                                if n == 0:
+                                    continue
+                            else:
+                                continue
+
+                        buffer += ch
+                        hash_value = hash_value * 43 + n
+                        # Keep as 32-bit signed like in calculate_hash
+                        if hash_value > 0x7FFFFFFF:
+                            hash_value = hash_value - 0x100000000
+                        elif hash_value < -0x80000000:
+                            hash_value = hash_value + 0x100000000
+                        hash_value = hash_value & 0xFFFFFFFF
+
+                        # Check if we can complete this to match desired_hash
+                        # Try adding up to 6 more characters
+                        for suffix_len in range(7):
+                            if suffix_len == 0:
+                                if hash_value == desired_hash:
+                                    return buffer
+                            else:
+                                # Calculate what suffix would be needed
+                                remaining = desired_hash - hash_value * (43**suffix_len)
+                                if remaining >= 0 and remaining < 43**suffix_len:
+                                    # Try to construct a valid suffix
+                                    suffix = ContextFile._try_construct_suffix(remaining, suffix_len)
+                                    if suffix and (
+                                        ContextFile._find_substring_in_title(title, title_len, suffix)
+                                        or len(suffix) < 3
+                                    ):
+                                        test_id = buffer + suffix
+                                        if ContextFile.calculate_hash(test_id) == desired_hash:
+                                            return test_id
+
+                    # Move to next starting position
+                    old_k = k
+                    # Skip past characters based on strategy
+                    if strategy > 0:  # Win 3.1
+                        # Skip valid characters
+                        while k < title_len and ord(title[k]) < 256 and oldtable[ord(title[k])] != 0:
+                            k += 1
+                        # Then skip invalid characters
+                        while k < title_len and ord(title[k]) < 256 and oldtable[ord(title[k])] == 0:
+                            k += 1
+                    else:  # Win95
+                        # Skip valid characters
+                        while (
+                            k < title_len
+                            and ord(title[k]) < 256
+                            and ContextFile._get_hash_table_value(ord(title[k])) != 0
+                        ):
+                            k += 1
+                        # Then skip invalid characters
+                        while (
+                            k < title_len
+                            and ord(title[k]) < 256
+                            and ContextFile._get_hash_table_value(ord(title[k])) == 0
+                        ):
+                            k += 1
+
+                    if k == old_k:  # Didn't advance, force increment
+                        k += 1
+
+        return None
+
+    @staticmethod
+    def _try_construct_suffix(remaining_hash: int, length: int) -> Optional[str]:
+        """Try to construct a valid suffix of given length that produces remaining_hash."""
+        untable = [
+            0,
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "0",
+            0,
+            ".",
+            "_",
+            0,
+            0,
+            0,
+            "A",
+            "B",
+            "C",
+            "D",
+            "E",
+            "F",
+            "G",
+            "H",
+            "I",
+            "J",
+            "K",
+            "L",
+            "M",
+            "N",
+            "O",
+            "P",
+            "Q",
+            "R",
+            "S",
+            "T",
+            "U",
+            "V",
+            "W",
+            "X",
+            "Y",
+            "Z",
+        ]
+
+        suffix = []
+        h = remaining_hash
+
+        for _ in range(length):
+            if h == 0:
+                break
+            remainder = h % 43
+            if remainder < len(untable) and untable[remainder] and untable[remainder] != 0:
+                suffix.insert(0, untable[remainder])
+                h //= 43
+            else:
+                return None
+
+        return "".join(suffix) if h == 0 else None
+
+    @staticmethod
+    def _find_substring_in_title(title: str, title_len: int, substring: str) -> bool:
+        """Check if substring appears in title (case insensitive using hash table)."""
+        sub_len = len(substring)
+        if sub_len > title_len:
+            return False
+
+        for i in range(title_len - sub_len + 1):
+            match = True
+            for j in range(sub_len):
+                # Compare using hash table values for case-insensitive match
+                title_char = ord(title[i + j]) if i + j < len(title) else 0
+                sub_char = ord(substring[j]) if j < len(substring) else 0
+
+                if title_char >= 256 or sub_char >= 256:
+                    if title_char != sub_char:
+                        match = False
+                        break
+                elif ContextFile._get_hash_table_value(title_char) != ContextFile._get_hash_table_value(sub_char):
+                    match = False
+                    break
+
+            if match:
+                return True
+
+        return False
+
+    @staticmethod
     def _get_hash_table_value(char_code: int) -> int:
         """Helper method to get hash table value for a character code.
 
