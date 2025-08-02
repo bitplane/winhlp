@@ -19,6 +19,8 @@ from .internal_files.ttlbtree import TTLBTreeFile
 from .internal_files.xwbtree import XWBTreeFile
 from .internal_files.xwdata import XWDataFile
 from .internal_files.xwmap import XWMapFile
+from .internal_files.cfn import CFnFile
+from .internal_files.rose import RoseFile
 from .internal_files.bitmap import BitmapFile
 from .internal_files.tomap import ToMapFile
 from .exceptions import InvalidHLPFileError
@@ -68,6 +70,8 @@ class HelpFile(BaseModel):
     keyword_search_files: Dict[
         str, Dict[str, Any]
     ] = {}  # Maps 'A' -> {'btree': XWBTreeFile, 'data': XWDataFile, 'map': XWMapFile}
+    config_files: Dict[int, CFnFile] = {}  # Maps config number -> CFnFile
+    rose: Optional[RoseFile] = None
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
@@ -189,6 +193,8 @@ class HelpFile(BaseModel):
         self.topicid = self._parse_topicid()
         self.ttlbtree = self._parse_ttlbtree()
         self.keyword_search_files = self._parse_keyword_search_files()
+        self.config_files = self._parse_config_files()
+        self.rose = self._parse_rose()
         self.bitmaps = self._parse_bitmaps()
 
     def _parse_header(self) -> HLPHeader:
@@ -682,4 +688,156 @@ class HelpFile(BaseModel):
         stats["total_keywords"] = total_keywords
         stats["total_references"] = total_references
 
+        return stats
+
+    def _parse_config_files(self) -> Dict[int, CFnFile]:
+        """
+        Parses all configuration files (|CFn) where n is an integer.
+        """
+        config_files = {}
+
+        # Check for all possible |CFn files (CF0, CF1, CF2, etc.)
+        for filename, offset in self.directory.files.items():
+            if filename.startswith("|CF") and len(filename) > 3:
+                # Extract config number (e.g., |CF0 -> 0, |CF123 -> 123)
+                config_num_str = filename[3:]
+                if config_num_str.isdigit():
+                    try:
+                        config_num = int(config_num_str)
+
+                        # Parse the |CFn file
+                        file_header_data = self.data[offset : offset + 9]
+                        if len(file_header_data) >= 9:
+                            reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+                            # Extract config data
+                            config_data = self.data[offset + 9 : offset + 9 + used_space]
+                            config_file = CFnFile(filename=filename, raw_data=config_data)
+                            config_files[config_num] = config_file
+
+                    except (struct.error, IndexError, ValueError):
+                        # Skip malformed config files
+                        continue
+
+        return config_files
+
+    def get_config_macros(self, config_number: int) -> List[str]:
+        """
+        Get all macros for a specific configuration number.
+
+        Args:
+            config_number: The configuration number (0, 1, 2, etc.)
+
+        Returns:
+            List of macro strings for the configuration
+        """
+        if config_number in self.config_files:
+            return self.config_files[config_number].get_macros()
+        return []
+
+    def get_all_config_numbers(self) -> List[int]:
+        """
+        Get all available configuration numbers.
+
+        Returns:
+            List of configuration numbers that have associated files
+        """
+        return list(self.config_files.keys())
+
+    def get_config_statistics(self) -> Dict[str, Any]:
+        """
+        Get statistics about all configuration files.
+
+        Returns:
+            Dictionary with configuration file statistics
+        """
+        if not self.config_files:
+            return {"total_config_files": 0, "total_macros": 0, "config_numbers": [], "config_stats": {}}
+
+        total_macros = 0
+        config_stats = {}
+
+        for config_num, config_file in self.config_files.items():
+            file_stats = config_file.get_statistics()
+            config_stats[config_num] = file_stats
+            total_macros += file_stats["total_macros"]
+
+        return {
+            "total_config_files": len(self.config_files),
+            "total_macros": total_macros,
+            "config_numbers": sorted(self.config_files.keys()),
+            "config_stats": config_stats,
+        }
+
+    def _parse_rose(self) -> RoseFile:
+        """
+        Parses the |Rose internal file.
+        """
+        if "|Rose" not in self.directory.files:
+            return None
+
+        rose_offset = self.directory.files["|Rose"]
+        # We need to read the file header to know the size of the |Rose file
+        file_header_data = self.data[rose_offset : rose_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        rose_data = self.data[rose_offset : rose_offset + 9 + used_space]
+        return RoseFile(filename="|Rose", raw_data=rose_data)
+
+    def get_macro_by_hash(self, keyword_hash: int) -> Optional[str]:
+        """
+        Get a macro string by its keyword hash from the |Rose file.
+
+        Args:
+            keyword_hash: The keyword hash to look up
+
+        Returns:
+            Macro string, or None if not found or no Rose file
+        """
+        if self.rose:
+            return self.rose.get_macro_string_by_hash(keyword_hash)
+        return None
+
+    def get_all_macro_definitions(self) -> List[tuple]:
+        """
+        Get all macro definitions from the |Rose file.
+
+        Returns:
+            List of (keyword_hash, macro, topic_title) tuples
+        """
+        if not self.rose:
+            return []
+
+        return [(entry.keyword_hash, entry.macro, entry.topic_title) for entry in self.rose.get_all_entries()]
+
+    def find_macros_by_pattern(self, pattern: str) -> List[tuple]:
+        """
+        Find macro definitions containing a pattern.
+
+        Args:
+            pattern: String pattern to search for in macro strings
+
+        Returns:
+            List of (keyword_hash, macro, topic_title) tuples matching the pattern
+        """
+        if not self.rose:
+            return []
+
+        matches = self.rose.find_macros_by_pattern(pattern)
+        return [(entry.keyword_hash, entry.macro, entry.topic_title) for entry in matches]
+
+    def get_rose_statistics(self) -> Dict[str, Any]:
+        """
+        Get statistics about the Rose file.
+
+        Returns:
+            Dictionary with Rose file statistics, or empty dict if no Rose file
+        """
+        if not self.rose:
+            return {"has_rose_file": False, "total_macros": 0}
+
+        stats = self.rose.get_statistics()
+        stats["has_rose_file"] = True
         return stats
