@@ -66,7 +66,7 @@ class PhraseFile(InternalFile):
 
         # Determine version from system file
         before31 = True
-        if self.system_file and hasattr(self.system_file, "header"):
+        if self.system_file and self.system_file.header is not None:
             before31 = self.system_file.header.minor < 16
 
         # Calculate phrase data parameters
@@ -135,7 +135,7 @@ class PhraseFile(InternalFile):
 
         # Get encoding from system file if available
         encoding = "cp1252"  # Default Windows Western European
-        if self.system_file and hasattr(self.system_file, "encoding"):
+        if self.system_file and self.system_file.encoding is not None:
             encoding = self.system_file.encoding
 
         # Try the determined encoding first

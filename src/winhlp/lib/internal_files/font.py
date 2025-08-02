@@ -477,7 +477,7 @@ class FontFile(InternalFile):
             charmap_name = charmap.split(",")[0] if "," in charmap else charmap
 
             # Try to find this charmap as an internal file in the help file
-            if self.parent_hlp and hasattr(self.parent_hlp, "directory"):
+            if self.parent_hlp and self.parent_hlp.directory is not None:
                 charmap_data = self._get_internal_file_data(charmap_name)
                 if charmap_data:
                     self._parse_charmap_file(charmap_name, charmap_data)
@@ -486,7 +486,7 @@ class FontFile(InternalFile):
         """
         Get the raw data for an internal file from the help file directory.
         """
-        if not self.parent_hlp or not hasattr(self.parent_hlp, "directory"):
+        if not self.parent_hlp or self.parent_hlp.directory is None:
             return None
 
         # Search for the filename in the directory

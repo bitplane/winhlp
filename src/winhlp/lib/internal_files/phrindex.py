@@ -118,7 +118,7 @@ class PhrIndexFile(InternalFile):
             return
 
         # Get PhrImage file data
-        if self.system_file and hasattr(self.system_file, "parent_hlp"):
+        if self.system_file and self.system_file.parent_hlp is not None:
             hlp_file = self.system_file.parent_hlp
             if "|PhrImage" not in hlp_file.directory.files:
                 return

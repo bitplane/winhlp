@@ -1062,7 +1062,7 @@ class TopicFile(InternalFile):
             return data[:data_len2]
 
         # Phrase compression is used (data_len2 > block_size - data_len1)
-        if self.system_file and hasattr(self.system_file, "parent_hlp"):
+        if self.system_file and self.system_file.parent_hlp is not None:
             hlp_file = self.system_file.parent_hlp
 
             if "|Phrases" in hlp_file.directory.files:
@@ -1981,7 +1981,7 @@ class TopicFile(InternalFile):
 
         # Get encoding from system file if available
         encoding = "cp1252"  # Default Windows Western European
-        if self.system_file and hasattr(self.system_file, "encoding"):
+        if self.system_file and self.system_file.encoding is not None:
             encoding = self.system_file.encoding
 
         # Try the determined encoding first
@@ -2624,30 +2624,54 @@ class TopicFile(InternalFile):
         """
         Resolve a topic offset to an actual topic number.
 
-        Based on helldeco.c logic for resolving TOPICOFFSET values.
+        This implements the complete topic resolution logic from helldeco.c:
+        1. For Win 3.0: Use |TOMAP file to map topic numbers to positions
+        2. For Win 3.1+: Use |CONTEXT file to resolve hash values, then map offsets
+        3. Fall back to TOPICOFFSET calculation and topic_offset_map
 
         From helldeco.h:
         TOPICOFFSET/0x8000 = block number,
         TOPICOFFSET%0x8000 = number of characters and hotspots counting from first TOPICLINK of this block
         """
-        if not hasattr(self, "topic_offset_map"):
+        if not self.topic_offset_map:
             self._build_topic_offset_map()
 
-        # Use the CONTEXT file if available to resolve hash-based lookups
-        if self.system_file and hasattr(self.system_file, "parent_hlp"):
-            hlp_file = self.system_file.parent_hlp
-            if "|CONTEXT" in hlp_file.directory.files and hasattr(hlp_file, "context"):
-                context_file = hlp_file.context
-                if context_file and topic_offset in context_file.context_map:
-                    # This is a hash value, get the actual topic offset
-                    actual_offset = context_file.context_map[topic_offset]
-                    topic_offset = actual_offset
+        # Determine Windows version for proper resolution strategy
+        before31 = self.system_file and self.system_file.header.minor < 16
 
-        # Try exact match first
+        if self.system_file and self.system_file.parent_hlp is not None:
+            hlp_file = self.system_file.parent_hlp
+
+            if before31:
+                # Windows 3.0: Use |TOMAP file for direct topic number lookup
+                if hlp_file.tomap is not None:
+                    # topic_offset is actually a topic number for Win 3.0
+                    topic_position = hlp_file.tomap.get_topic_position(topic_offset)
+                    if topic_position is not None:
+                        # Return the topic number directly
+                        return topic_offset
+
+                # Fall back to topic_offset_map for Win 3.0
+                if topic_offset in self.topic_offset_map:
+                    return self.topic_offset_map[topic_offset]
+            else:
+                # Windows 3.1+: Use |CONTEXT file to resolve hash-based lookups
+                if "|CONTEXT" in hlp_file.directory.files and hlp_file.context is not None:
+                    context_file = hlp_file.context
+                    if topic_offset in context_file.context_map:
+                        # This is a hash value, get the actual topic offset
+                        actual_offset = context_file.context_map[topic_offset]
+                        # Now resolve the actual offset using our topic_offset_map
+                        if actual_offset in self.topic_offset_map:
+                            return self.topic_offset_map[actual_offset]
+                        # Continue with TOPICOFFSET calculation using actual_offset
+                        topic_offset = actual_offset
+
+        # Try exact match in our built topic_offset_map first
         if topic_offset in self.topic_offset_map:
             return self.topic_offset_map[topic_offset]
 
-        # Calculate block number and position within block
+        # Calculate block number and position within block (TOPICOFFSET format)
         block_number = topic_offset // 0x8000
         position_in_block = topic_offset % 0x8000
 
@@ -2676,94 +2700,141 @@ class TopicFile(InternalFile):
         """
         Build a mapping of topic offsets to topic numbers.
 
-        This follows the NextTopicOffset logic from helldeco.c to track
-        proper TOPICOFFSET values as we parse through the file.
+        This follows the TopicRead loop from helldeco.c to track proper TOPICOFFSET
+        values as we parse through the decompressed topic blocks.
         """
         self.topic_offset_map = {}
 
-        # Initialize tracking variables like helldeco.c
-        topic_offset = 0  # Current TOPICOFFSET
+        # Initialize tracking variables like helldeco.c TopicDump function
+        topic_offset = 0  # Current TOPICOFFSET (like helldeco.c)
         topic_pos = 12  # Current position in |TOPIC file (start after first TOPICBLOCKHEADER)
-        topic_number = 0  # Current topic number
+        topic_number = 16  # Topic numbers start at 16 for Win 3.0, 0 for Win 3.1+
 
-        # Determine decompression size based on version
+        # Determine version and decompression settings
         before31 = self.system_file and self.system_file.header.minor < 16
         if before31:
-            decompress_size = 2048  # Windows 3.0
+            decompress_size = 2048  # DecompressSize for Windows 3.0
+            topic_number = 16  # Win 3.0 starts at 16
         else:
-            decompress_size = 16384  # Windows 3.1+
+            decompress_size = 16384  # DecompressSize for Windows 3.1+
+            topic_number = 0  # Win 3.1+ starts at 0
 
-        # Parse through all blocks to build offset mapping
-        offset = 0
-        while offset < len(self.raw_data):
-            # Read TOPICBLOCKHEADER
-            if offset + 12 > len(self.raw_data):
+        # Use the TopicRead pattern from helldeco.c to traverse all TOPICLINK records
+        if not self.system_file or self.system_file.parent_hlp is None:
+            return
+
+        hlp_file = self.system_file.parent_hlp
+        if "|TOPIC" not in hlp_file.directory.files:
+            return
+
+        # Get the raw topic file data for processing
+        topic_file_offset = hlp_file.directory.files["|TOPIC"]
+        topic_file_header = hlp_file.data[topic_file_offset : topic_file_offset + 9]
+        if len(topic_file_header) < 9:
+            return
+
+        reserved_space, used_space, file_flags = struct.unpack("<llB", topic_file_header)
+        topic_file_data = hlp_file.data[topic_file_offset + 9 : topic_file_offset + 9 + used_space]
+        topic_file_length = len(topic_file_data)
+
+        # Simulate the TopicRead loop from helldeco.c
+        while topic_pos < topic_file_length:
+            # Read TOPICLINK structure (21 bytes minimum)
+            if topic_pos + 21 > topic_file_length:
                 break
 
-            raw_header_bytes = self.raw_data[offset : offset + 12]
-            last_topic_link, first_topic_link, last_topic_header = struct.unpack("<lll", raw_header_bytes)
-
-            # Determine block size
-            if before31:
-                topic_block_size = 2048
-            else:
-                topic_block_size = 4096
-
-            block_data_size = topic_block_size - 12
-            block_data_raw = self.raw_data[offset + 12 : offset + 12 + block_data_size]
-
-            # Decompress block data if needed
-            is_lz_compressed = False
-            if not before31 and self.system_file:
-                if self.system_file.header.flags == 4 or self.system_file.header.flags == 8:
-                    is_lz_compressed = True
-
-            if is_lz_compressed:
-                from ..compression import decompress
-
-                block_data = decompress(method=2, data=block_data_raw)
-            else:
-                block_data = block_data_raw
-
-            # Parse TOPICLINK structures in this block
-            block_offset = 0
-            while block_offset < len(block_data):
-                if block_offset + 21 > len(block_data):
+            try:
+                # Use our existing topic reading infrastructure
+                block_data, decompressed_pos = self._read_topic_data_at_position(
+                    topic_file_data, topic_pos, 21, before31, decompress_size
+                )
+                if not block_data or len(block_data) < 21:
                     break
 
-                # Read TOPICLINK header
-                linkdata1_size, linkdata2_size, record_type = struct.unpack_from("<llB", block_data, block_offset)
+                # Parse TOPICLINK header
+                linkdata1_size, linkdata2_size, record_type, prev_block, next_block = struct.unpack_from(
+                    "<llBlL", block_data, 0
+                )
 
-                if record_type == 0x02:  # TL_TOPICHDR - start of new topic
-                    # Store the mapping of topic offset to topic number
+                # Check for topic header record (TL_TOPICHDR = 0x02)
+                if record_type == 0x02:
+                    # Store the mapping: topic_offset -> topic_number
                     self.topic_offset_map[topic_offset] = topic_number
                     topic_number += 1
 
-                # Calculate size of this TOPICLINK
-                total_link_size = 21 + linkdata1_size + linkdata2_size
-                if block_offset + total_link_size > len(block_data):
-                    break
-
-                # Read NextBlock field (from TOPICLINK structure)
-                next_block = struct.unpack_from("<l", block_data, block_offset + 17)[0]
-
-                if next_block <= 0:
-                    break
-
-                # Advance using NextTopicOffset logic from helldeco.c
+                # Break if no next block
                 if before31:
-                    # Windows 3.0: relative offset
+                    if topic_pos + next_block >= topic_file_length:
+                        break
                     topic_pos += next_block
                 else:
-                    # Windows 3.1+: absolute positioning with NextTopicOffset calculation
-                    next_topic_pos = next_block
-                    topic_offset = self._next_topic_offset(topic_offset, next_topic_pos, topic_pos, decompress_size)
-                    topic_pos = next_topic_pos
+                    if next_block <= 0:
+                        break
+                    # Use NextTopicOffset logic for Win 3.1+
+                    topic_offset = self._next_topic_offset(topic_offset, next_block, topic_pos, decompress_size)
+                    topic_pos = next_block
 
-                block_offset += total_link_size
+            except (struct.error, IndexError):
+                # Malformed data, stop processing
+                break
 
-            # Move to next block
-            offset += topic_block_size
+    def _read_topic_data_at_position(
+        self, topic_file_data: bytes, topic_pos: int, num_bytes: int, before31: bool, decompress_size: int
+    ) -> tuple[bytes, int]:
+        """
+        Read and decompress topic data at a specific position, following TopicRead logic.
+
+        Returns tuple of (decompressed_data, actual_position_read)
+        """
+        TOPICBLOCKHEADER_SIZE = 12
+
+        # Calculate which block this position falls into
+        if before31:
+            topic_block_size = 2048
+        else:
+            topic_block_size = 4096
+
+        block_number = (topic_pos - TOPICBLOCKHEADER_SIZE) // decompress_size
+        block_offset = (topic_pos - TOPICBLOCKHEADER_SIZE) % decompress_size
+
+        # Calculate file offset for this block
+        file_block_offset = block_number * topic_block_size
+        if file_block_offset + topic_block_size > len(topic_file_data):
+            return b"", topic_pos
+
+        # Read the block header and data
+        block_header_data = topic_file_data[file_block_offset : file_block_offset + TOPICBLOCKHEADER_SIZE]
+        if len(block_header_data) < TOPICBLOCKHEADER_SIZE:
+            return b"", topic_pos
+
+        # Read compressed block data
+        compressed_block_data = topic_file_data[
+            file_block_offset + TOPICBLOCKHEADER_SIZE : file_block_offset + topic_block_size
+        ]
+
+        # Decompress if needed
+        is_lz_compressed = False
+        if not before31 and self.system_file:
+            if self.system_file.header.flags in [4, 8]:
+                is_lz_compressed = True
+
+        if is_lz_compressed:
+            try:
+                from ..compression import decompress
+
+                decompressed_data = decompress(method=2, data=compressed_block_data)
+            except Exception:
+                return b"", topic_pos
+        else:
+            decompressed_data = compressed_block_data
+
+        # Extract the requested data from the decompressed block
+        if block_offset + num_bytes <= len(decompressed_data):
+            return decompressed_data[block_offset : block_offset + num_bytes], topic_pos + num_bytes
+        else:
+            # Data spans multiple blocks - for now, return what we can
+            available_data = decompressed_data[block_offset:]
+            return available_data, topic_pos + len(available_data)
 
     def _next_topic_offset(
         self, current_topic_offset: int, next_block: int, topic_pos: int, decompress_size: int
@@ -2796,9 +2867,9 @@ class TopicFile(InternalFile):
         a context name that produces the given hash value.
         """
         # Try to use the CONTEXT file if available
-        if self.system_file and hasattr(self.system_file, "parent_hlp"):
+        if self.system_file and self.system_file.parent_hlp is not None:
             hlp_file = self.system_file.parent_hlp
-            if "|CONTEXT" in hlp_file.directory.files and hasattr(hlp_file, "context"):
+            if "|CONTEXT" in hlp_file.directory.files and hlp_file.context is not None:
                 context_file = hlp_file.context
                 if context_file:
                     # Try reverse lookup using the ContextFile.reverse_hash method

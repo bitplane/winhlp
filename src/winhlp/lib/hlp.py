@@ -14,6 +14,7 @@ from .internal_files.viola import ViolaFile
 from .internal_files.gmacros import GMacrosFile
 from .internal_files.phrindex import PhrIndexFile
 from .internal_files.bitmap import BitmapFile
+from .internal_files.tomap import ToMapFile
 from .exceptions import InvalidHLPFileError
 import struct
 
@@ -53,6 +54,7 @@ class HelpFile(BaseModel):
     viola: Optional[ViolaFile] = None
     gmacros: Optional[GMacrosFile] = None
     phrindex: Optional[PhrIndexFile] = None
+    tomap: Optional[ToMapFile] = None
     bitmaps: Dict[str, BitmapFile] = {}
 
     def __init__(self, filepath: str, **data):
@@ -165,6 +167,7 @@ class HelpFile(BaseModel):
         self.topic = self._parse_topic()
         self.context = self._parse_context()
         self.phrase = self._parse_phrase()
+        self.tomap = self._parse_tomap()
         self.ctxomap = self._parse_ctxomap()
         self.catalog = self._parse_catalog()
         self.viola = self._parse_viola()
@@ -317,6 +320,23 @@ class HelpFile(BaseModel):
 
         phrase_data = self.data[phrase_offset + 9 : phrase_offset + 9 + used_space]
         return PhraseFile(filename="|Phrases", raw_data=phrase_data, system_file=self.system)
+
+    def _parse_tomap(self) -> ToMapFile:
+        """
+        Parses the |TOMAP internal file for Windows 3.0 help files.
+        """
+        if "|TOMAP" not in self.directory.files:
+            return None
+
+        tomap_offset = self.directory.files["|TOMAP"]
+        # We need to read the file header to know the size of the |TOMAP file
+        file_header_data = self.data[tomap_offset : tomap_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        tomap_data = self.data[tomap_offset + 9 : tomap_offset + 9 + used_space]
+        return ToMapFile(filename="|TOMAP", raw_data=tomap_data)
 
     def _parse_ctxomap(self) -> CtxoMapFile:
         """
