@@ -100,8 +100,10 @@ class ContextFile(InternalFile):
         From helpfile.md:
         The hash value for an empty string is 1.
         Only 0-9, A-Z, a-z, _ and . are legal characters for context ids in Win 3.1 (HC31).
+
+        Note: The hash table contains signed byte values. Values > 0x7F are negative.
         """
-        # Hash table from helpfile.md
+        # Hash table from helpfile.md - these are SIGNED byte values
         hash_table = [
             0x00,
             0xD1,
@@ -368,9 +370,19 @@ class ContextFile(InternalFile):
         for char in context_name:
             char_code = ord(char)
             if char_code < 256:
-                hash_value = (hash_value * 43 + hash_table[char_code]) & 0xFFFFFFFF
+                table_value = hash_table[char_code]
+                # Convert to signed byte if necessary (values > 0x7F are negative)
+                if table_value > 0x7F:
+                    table_value = table_value - 256
+                hash_value = hash_value * 43 + table_value
+                # Keep as 32-bit signed integer
+                if hash_value > 0x7FFFFFFF:
+                    hash_value = hash_value - 0x100000000
+                elif hash_value < -0x80000000:
+                    hash_value = hash_value + 0x100000000
 
-        return hash_value
+        # Return as unsigned 32-bit value
+        return hash_value & 0xFFFFFFFF
 
     @staticmethod
     def reverse_hash(hash_value: int) -> str:
@@ -381,94 +393,118 @@ class ContextFile(InternalFile):
         This generates a context ID that produces the given hash value.
         """
         # Character lookup table from helpdeco.c (untable)
+        # Maps remainders to valid characters
         untable = [
-            0,
-            "1",
-            "2",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7",
-            "8",
-            "9",
-            "0",
-            0,
-            ".",
-            "_",
-            0,
-            0,
-            0,
-            "A",
-            "B",
-            "C",
-            "D",
-            "E",
-            "F",
-            "G",
-            "H",
-            "I",
-            "J",
-            "K",
-            "L",
-            "M",
-            "N",
-            "O",
-            "P",
-            "Q",
-            "R",
-            "S",
-            "T",
-            "U",
-            "V",
-            "W",
-            "X",
-            "Y",
-            "Z",
+            0,  # 0
+            "1",  # 1
+            "2",  # 2
+            "3",  # 3
+            "4",  # 4
+            "5",  # 5
+            "6",  # 6
+            "7",  # 7
+            "8",  # 8
+            "9",  # 9
+            "0",  # 10
+            0,  # 11
+            ".",  # 12
+            "_",  # 13
+            0,  # 14
+            0,  # 15
+            0,  # 16
+            "A",  # 17
+            "B",  # 18
+            "C",  # 19
+            "D",  # 20
+            "E",  # 21
+            "F",  # 22
+            "G",  # 23
+            "H",  # 24
+            "I",  # 25
+            "J",  # 26
+            "K",  # 27
+            "L",  # 28
+            "M",  # 29
+            "N",  # 30
+            "O",  # 31
+            "P",  # 32
+            "Q",  # 33
+            "R",  # 34
+            "S",  # 35
+            "T",  # 36
+            "U",  # 37
+            "V",  # 38
+            "W",  # 39
+            "X",  # 40
+            "Y",  # 41
+            "Z",  # 42
         ]
 
         if hash_value == 1:
             return ""  # Empty string hashes to 1
 
-        buffer = []
+        # Try all possible starting remainders (0-42)
+        for i in range(43):
+            buffer = []
+            # Work backwards from the end of a 14-char buffer
+            j = 14
 
-        # Implementation based on helldeco.c unhash() function
-        # This is a simplified version that generates valid context strings
-        remaining = hash_value
+            # 64-bit division simulation using 32-bit parts
+            hashlo = hash_value & 0xFFFFFFFF
+            hashhi = i
 
-        # Try to build a string by working backwards from the hash
-        while remaining > 1 and len(buffer) < 14:  # Max context length
-            # Find a character that could contribute to this hash
-            for i, char in enumerate(untable):
-                if char and char != 0:
-                    # Test if this character could be part of the hash
-                    test_hash = 0
-                    test_str = "".join(buffer) + char
-                    for c in test_str:
-                        test_hash = (test_hash * 43 + ContextFile._get_hash_table_value(ord(c))) & 0xFFFFFFFF
+            while True:
+                # Divide by 43 using long division
+                # 43 * 0x80000000 = 0x558000000 (divhi=21, divlo=0x80000000)
+                divhi = 21
+                divlo = 0x80000000
+                result = 0
 
-                    if test_hash == hash_value:
-                        return test_str
+                # Perform 64-bit division bit by bit
+                for bit in range(31, -1, -1):
+                    mask = 1 << bit
 
-            # If we can't find an exact match, generate a reasonable context ID
-            # Use the hash value itself as the basis for a unique identifier
-            char_idx = remaining % len([c for c in untable if c and c != 0])
-            valid_chars = [c for c in untable if c and c != 0]
-            if char_idx < len(valid_chars):
-                buffer.append(valid_chars[char_idx])
-                remaining //= 43
-            else:
-                break
+                    # Check if we can subtract divisor
+                    if hashhi > divhi or (hashhi == divhi and hashlo >= divlo):
+                        result |= mask
+                        hashhi -= divhi
+                        if divlo > hashlo:
+                            hashhi -= 1
+                        hashlo = (hashlo - divlo) & 0xFFFFFFFF
 
-        if not buffer:
-            # Fallback: create a unique identifier based on the hash
-            return f"CTX_{hash_value:08X}"
+                    # Shift divisor right by 1
+                    divlo >>= 1
+                    if divhi & 1:
+                        divlo |= 0x80000000
+                    divhi >>= 1
 
-        return "".join(buffer)
+                # The remainder is in hashlo (0-42)
+                if hashlo < len(untable):
+                    ch = untable[hashlo]
+                    if not ch:
+                        break
+                    buffer.insert(0, ch)
+                    j -= 1
+                else:
+                    break
+
+                # If quotient is 0, we found a valid string
+                if result == 0:
+                    return "".join(buffer)
+
+                # Continue with quotient as new value
+                hashlo = result
+                hashhi = 0
+
+        # Fallback: create a unique identifier based on the hash
+        return f"CTX_{hash_value:08X}"
 
     @staticmethod
     def _get_hash_table_value(char_code: int) -> int:
-        """Helper method to get hash table value for a character code."""
+        """Helper method to get hash table value for a character code.
+
+        Returns the signed byte value from the hash table.
+        """
         hash_table = [
             0x00,
             0xD1,
@@ -729,5 +765,9 @@ class ContextFile(InternalFile):
         ]
 
         if char_code < len(hash_table):
-            return hash_table[char_code]
+            value = hash_table[char_code]
+            # Convert to signed byte if necessary (values > 0x7F are negative)
+            if value > 0x7F:
+                value = value - 256
+            return value
         return 0
