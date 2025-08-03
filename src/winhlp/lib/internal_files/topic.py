@@ -1895,14 +1895,15 @@ class TopicFile(InternalFile):
                 total_text_position += len(current_text)
                 current_text_bytes.clear()
 
-        # Main interleaved parsing loop
+        # Main interleaved parsing loop - matches C code algorithm
+        # Process strings and formatting commands in the proper sequence
         while linkdata2_ptr < len(raw_linkdata2) and linkdata1_ptr < len(linkdata1):
-            # 1. Read null-terminated string from LinkData2
+            # 1. Read complete null-terminated string from LinkData2
             string_start = linkdata2_ptr
             while linkdata2_ptr < len(raw_linkdata2) and raw_linkdata2[linkdata2_ptr] != 0x00:
                 linkdata2_ptr += 1
 
-            # Add string to current text (even if empty)
+            # Process the string (add to current text accumulation)
             if string_start < linkdata2_ptr:
                 current_text_bytes.extend(raw_linkdata2[string_start:linkdata2_ptr])
 
@@ -1910,7 +1911,7 @@ class TopicFile(InternalFile):
             if linkdata2_ptr < len(raw_linkdata2):
                 linkdata2_ptr += 1
 
-            # 2. Read formatting command from LinkData1 (if available)
+            # 2. After processing string, read formatting command from LinkData1
             if linkdata1_ptr < len(linkdata1):
                 command_byte = linkdata1[linkdata1_ptr]
                 linkdata1_ptr += 1

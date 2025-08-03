@@ -191,6 +191,10 @@ def runlen_decompress(data: bytes) -> bytes:
     - If count & 0x80 is set, emit characters one by one
     - Otherwise emit the full run at once
     - When count reaches 0, read next signed byte as new count
+
+    From C code:
+    signed char count; /* for run len decompression */
+    count = (signed char)c;
     """
     if not data:
         return b""
@@ -216,9 +220,10 @@ def runlen_decompress(data: bytes) -> bytes:
                 count = 0
         else:
             # Start new run - char is the signed count
-            count = char if char < 128 else char - 256  # Convert to signed byte
-            if count < 0:
-                count = 256 + count  # Convert back to unsigned for bit operations
+            # Match C code: count = (signed char)c;
+            count = struct.unpack("b", bytes([char]))[0]  # Convert to signed byte
+            # Convert back to unsigned byte for bit operations, preserving sign bit
+            count = count & 0xFF
 
     return bytes(output)
 
