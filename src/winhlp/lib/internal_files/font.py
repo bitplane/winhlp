@@ -38,6 +38,39 @@ class OldFont(BaseModel):
     raw_data: dict
 
 
+class MVBFont(BaseModel):
+    """
+    Font descriptor for MultiMedia Viewer (MVP) files.
+    From `helpdeco.h`: MVBFONT
+    """
+
+    font_name: int  # int16_t FontName
+    expndtw: int  # int16_t expndtw
+    style: int  # uint16_t style
+    fg_rgb: Tuple[int, int, int]  # unsigned char FGRGB[3]
+    bg_rgb: Tuple[int, int, int]  # unsigned char BGRGB[3]
+    height: int  # int32_t Height
+    mostly_zero: bytes  # unsigned char mostlyzero[12]
+    weight: int  # int16_t Weight
+    unknown10: int  # unsigned char unknown10
+    unknown11: int  # unsigned char unknown11
+    italic: int  # unsigned char Italic
+    underline: int  # unsigned char Underline
+    strike_out: int  # unsigned char StrikeOut
+    double_underline: int  # unsigned char DoubleUnderline
+    small_caps: int  # unsigned char SmallCaps
+    unknown17: int  # unsigned char unknown17
+    unknown18: int  # unsigned char unknown18
+    pitch_and_family: int  # unsigned char PitchAndFamily
+    unknown20: int  # unsigned char unknown20
+    charset: int  # unsigned char Charset
+    unknown22: int  # unsigned char unknown22
+    unknown23: int  # unsigned char unknown23
+    unknown24: int  # unsigned char unknown24
+    up: int  # signed char up
+    raw_data: dict
+
+
 class NewFont(BaseModel):
     """
     Font descriptor for newer HLP files.
@@ -69,15 +102,17 @@ class NewFont(BaseModel):
     raw_data: dict
 
 
-class MVBFont(BaseModel):
+class MVBStyle(BaseModel):
     """
-    Font descriptor for multimedia HLP files.
-    From `helpdeco.h`: MVBFONT
+    Character style for MultiMedia Viewer (MVP) files.
+    From `helpdeco.h`: MVBSTYLE
     """
 
-    font_name_index: int
-    expndtw: int
-    style: int
+    wStyleNum: int  # uint16_t StyleNum
+    wBasedOn: int  # uint16_t BasedOn
+    nf: MVBFont  # MVBFONT font
+    bReserved: bytes = Field(..., max_length=35)  # char unknown[35]
+    bStyleName: bytes = Field(..., max_length=65)  # char StyleName[65]
     raw_data: dict
 
 
@@ -92,20 +127,6 @@ class NewStyle(BaseModel):
     nf: NewFont
     bReserved: bytes = Field(..., max_length=35)
     bStyleName: bytes = Field(..., max_length=65)
-    raw_data: dict
-
-
-class MVBStyle(BaseModel):
-    """
-    Character style for multimedia HLP files.
-    From `helpdeco.h`: MVBSTYLE
-    """
-
-    style_num: int
-    based_on: int
-    font: MVBFont
-    unknown: bytes = Field(..., max_length=35)
-    style_name: bytes = Field(..., max_length=65)
     raw_data: dict
 
 
@@ -247,8 +268,73 @@ class FontFile(InternalFile):
         Parses the font descriptors.
         """
         offset = self.header.descriptors_offset
+        is_mvp = self.system_file and hasattr(self.system_file, "is_mvp") and self.system_file.is_mvp
+
         for _ in range(self.header.num_descriptors):
-            if self.system_file and self.system_file.header.minor > 16:
+            if is_mvp:
+                # MVBFont - parse according to helpdeco MVBFONT structure
+                # sizeof_MVBFONT = 48 bytes
+                raw_bytes = self.raw_data[offset : offset + 48]
+                if len(raw_bytes) < 48:
+                    break
+
+                # Parse MVBFONT structure
+                font_name = struct.unpack("<h", raw_bytes[0:2])[0]  # int16_t FontName
+                expndtw = struct.unpack("<h", raw_bytes[2:4])[0]  # int16_t expndtw
+                style = struct.unpack("<H", raw_bytes[4:6])[0]  # uint16_t style
+                fg_r, fg_g, fg_b = raw_bytes[6], raw_bytes[7], raw_bytes[8]  # FGRGB[3]
+                bg_r, bg_g, bg_b = raw_bytes[9], raw_bytes[10], raw_bytes[11]  # BGRGB[3]
+                height = struct.unpack("<l", raw_bytes[12:16])[0]  # int32_t Height
+                mostly_zero = raw_bytes[16:28]  # mostlyzero[12]
+                weight = struct.unpack("<h", raw_bytes[28:30])[0]  # int16_t Weight
+                unknown10 = raw_bytes[30]
+                unknown11 = raw_bytes[31]
+                italic = raw_bytes[32]
+                underline = raw_bytes[33]
+                strike_out = raw_bytes[34]
+                double_underline = raw_bytes[35]
+                small_caps = raw_bytes[36]
+                unknown17 = raw_bytes[37]
+                unknown18 = raw_bytes[38]
+                pitch_and_family = raw_bytes[39]
+                unknown20 = raw_bytes[40]
+                charset = raw_bytes[41]
+                unknown22 = raw_bytes[42]
+                unknown23 = raw_bytes[43]
+                unknown24 = raw_bytes[44]
+                up = struct.unpack("b", raw_bytes[45:46])[0]  # signed char
+
+                parsed_descriptor = {
+                    "font_name": font_name,
+                    "expndtw": expndtw,
+                    "style": style,
+                    "fg_rgb": (fg_r, fg_g, fg_b),
+                    "bg_rgb": (bg_r, bg_g, bg_b),
+                    "height": height,
+                    "mostly_zero": mostly_zero,
+                    "weight": weight,
+                    "unknown10": unknown10,
+                    "unknown11": unknown11,
+                    "italic": italic,
+                    "underline": underline,
+                    "strike_out": strike_out,
+                    "double_underline": double_underline,
+                    "small_caps": small_caps,
+                    "unknown17": unknown17,
+                    "unknown18": unknown18,
+                    "pitch_and_family": pitch_and_family,
+                    "unknown20": unknown20,
+                    "charset": charset,
+                    "unknown22": unknown22,
+                    "unknown23": unknown23,
+                    "unknown24": unknown24,
+                    "up": up,
+                }
+                self.descriptors.append(
+                    MVBFont(**parsed_descriptor, raw_data={"raw": raw_bytes, "parsed": parsed_descriptor})
+                )
+                offset += 48
+            elif self.system_file and self.system_file.header.minor > 16:
                 # NewFont - parse according to helpdeco NEWFONT structure
                 raw_bytes = self.raw_data[offset : offset + 42]
                 if len(raw_bytes) < 42:
@@ -347,8 +433,113 @@ class FontFile(InternalFile):
             return
 
         offset = self.header.formats_offset
+        is_mvp = self.system_file and hasattr(self.system_file, "is_mvp") and self.system_file.is_mvp
+
         for i in range(self.header.num_formats):
-            if self.system_file and self.system_file.header.minor > 16:
+            if is_mvp:
+                # MVBStyle - parse according to helpdeco MVBSTYLE structure
+                # sizeof_MVBSTYLE = 152 bytes (2+2+48+35+65)
+                raw_bytes = self.raw_data[offset : offset + 152]
+                if len(raw_bytes) < 152:
+                    break
+
+                wStyleNum, wBasedOn = struct.unpack_from("<HH", raw_bytes)
+                font_data = raw_bytes[4:52]  # MVBFont is 48 bytes
+                bReserved = raw_bytes[52:87]  # 35 bytes
+                bStyleName = raw_bytes[87:152]  # 65 bytes
+
+                # Parse the embedded MVBFont data
+                font_name = struct.unpack("<h", font_data[0:2])[0]
+                expndtw = struct.unpack("<h", font_data[2:4])[0]
+                style = struct.unpack("<H", font_data[4:6])[0]
+                fg_r, fg_g, fg_b = font_data[6], font_data[7], font_data[8]
+                bg_r, bg_g, bg_b = font_data[9], font_data[10], font_data[11]
+                height = struct.unpack("<l", font_data[12:16])[0]
+                mostly_zero = font_data[16:28]
+                weight = struct.unpack("<h", font_data[28:30])[0]
+                unknown10 = font_data[30]
+                unknown11 = font_data[31]
+                italic = font_data[32]
+                underline = font_data[33]
+                strike_out = font_data[34]
+                double_underline = font_data[35]
+                small_caps = font_data[36]
+                unknown17 = font_data[37]
+                unknown18 = font_data[38]
+                pitch_and_family = font_data[39]
+                unknown20 = font_data[40]
+                charset = font_data[41]
+                unknown22 = font_data[42]
+                unknown23 = font_data[43]
+                unknown24 = font_data[44]
+                up = struct.unpack("b", font_data[45:46])[0]
+
+                nf = MVBFont(
+                    font_name=font_name,
+                    expndtw=expndtw,
+                    style=style,
+                    fg_rgb=(fg_r, fg_g, fg_b),
+                    bg_rgb=(bg_r, bg_g, bg_b),
+                    height=height,
+                    mostly_zero=mostly_zero,
+                    weight=weight,
+                    unknown10=unknown10,
+                    unknown11=unknown11,
+                    italic=italic,
+                    underline=underline,
+                    strike_out=strike_out,
+                    double_underline=double_underline,
+                    small_caps=small_caps,
+                    unknown17=unknown17,
+                    unknown18=unknown18,
+                    pitch_and_family=pitch_and_family,
+                    unknown20=unknown20,
+                    charset=charset,
+                    unknown22=unknown22,
+                    unknown23=unknown23,
+                    unknown24=unknown24,
+                    up=up,
+                    raw_data={
+                        "raw": font_data,
+                        "parsed": {
+                            "font_name": font_name,
+                            "expndtw": expndtw,
+                            "style": style,
+                            "fg_rgb": (fg_r, fg_g, fg_b),
+                            "bg_rgb": (bg_r, bg_g, bg_b),
+                            "height": height,
+                            "mostly_zero": mostly_zero,
+                            "weight": weight,
+                            "unknown10": unknown10,
+                            "unknown11": unknown11,
+                            "italic": italic,
+                            "underline": underline,
+                            "strike_out": strike_out,
+                            "double_underline": double_underline,
+                            "small_caps": small_caps,
+                            "unknown17": unknown17,
+                            "unknown18": unknown18,
+                            "pitch_and_family": pitch_and_family,
+                            "unknown20": unknown20,
+                            "charset": charset,
+                            "unknown22": unknown22,
+                            "unknown23": unknown23,
+                            "unknown24": unknown24,
+                            "up": up,
+                        },
+                    },
+                )
+
+                parsed_style = {
+                    "wStyleNum": wStyleNum,
+                    "wBasedOn": wBasedOn,
+                    "nf": nf,
+                    "bReserved": bReserved,
+                    "bStyleName": bStyleName,
+                }
+                self.styles.append(MVBStyle(**parsed_style, raw_data={"raw": raw_bytes, "parsed": parsed_style}))
+                offset += 152
+            elif self.system_file and self.system_file.header.minor > 16:
                 # NewStyle
                 raw_bytes = self.raw_data[offset : offset + 146]
                 if len(raw_bytes) < 146:

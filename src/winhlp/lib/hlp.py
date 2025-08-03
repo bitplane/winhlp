@@ -70,6 +70,9 @@ class HelpFile(BaseModel):
     keyword_search_files: Dict[
         str, Dict[str, Any]
     ] = {}  # Maps 'A' -> {'btree': XWBTreeFile, 'data': XWDataFile, 'map': XWMapFile}
+    keyword_index_files: Dict[
+        str, Dict[str, Any]
+    ] = {}  # Maps 'A' -> {'btree': XWBTreeFile, 'data': XWDataFile, 'map': XWMapFile} for |xKWBTREE files
     config_files: Dict[int, CFnFile] = {}  # Maps config number -> CFnFile
     rose: Optional[RoseFile] = None
 
@@ -193,6 +196,7 @@ class HelpFile(BaseModel):
         self.topicid = self._parse_topicid()
         self.ttlbtree = self._parse_ttlbtree()
         self.keyword_search_files = self._parse_keyword_search_files()
+        self.keyword_index_files = self._parse_keyword_index_files()
         self.config_files = self._parse_config_files()
         self.rose = self._parse_rose()
         self.bitmaps = self._parse_bitmaps()
@@ -721,6 +725,80 @@ class HelpFile(BaseModel):
 
         return config_files
 
+    def _parse_keyword_index_files(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Parses all keyword index files (|xKWBTREE, |xKWDATA, |xKWMAP) where x is A-Z, a-z.
+        These are different from regular keyword search files - they're used for keyword indices.
+        From C code: when keyindex[char] is TRUE, use |xKWBTREE instead of |xWBTREE.
+        """
+        keyword_index_files = {}
+
+        # Only parse keyword index files for characters marked as keyword indices in SystemFile
+        if self.system and hasattr(self.system, "keyword_indices"):
+            for char in self.system.keyword_indices:
+                keyword_index_files.update(self._parse_keyword_index_set(char))
+
+        return keyword_index_files
+
+    def _parse_keyword_index_set(self, char: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Parse a complete keyword index set for a given character.
+
+        Args:
+            char: The character identifier (A-Z, a-z)
+
+        Returns:
+            Dictionary mapping char to parsed files, or empty dict if files don't exist
+        """
+        btree_name = f"|{char}KWBTREE"
+        data_name = f"|{char}KWDATA"
+        map_name = f"|{char}KWMAP"
+
+        # Check if all three files exist
+        if (
+            btree_name not in self.directory.files
+            or data_name not in self.directory.files
+            or map_name not in self.directory.files
+        ):
+            return {}
+
+        try:
+            # Parse |xKWBTREE file
+            btree_offset = self.directory.files[btree_name]
+            file_header_data = self.data[btree_offset : btree_offset + 9]
+            if len(file_header_data) < 9:
+                return {}
+            reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+            btree_data = self.data[btree_offset : btree_offset + 9 + used_space]
+            btree_file = XWBTreeFile(filename=btree_name, raw_data=btree_data)
+
+            # Parse |xKWDATA file
+            data_offset = self.directory.files[data_name]
+            file_header_data = self.data[data_offset : data_offset + 9]
+            if len(file_header_data) < 9:
+                return {}
+            reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+            data_data = self.data[data_offset : data_offset + 9 + used_space]
+            data_file = XWDataFile(filename=data_name, raw_data=data_data)
+
+            # Parse |xKWMAP file
+            map_offset = self.directory.files[map_name]
+            file_header_data = self.data[map_offset : map_offset + 9]
+            if len(file_header_data) < 9:
+                return {}
+            reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+            map_data = self.data[map_offset : map_offset + 9 + used_space]
+            map_file = XWMapFile(filename=map_name, raw_data=map_data)
+
+            return {char: {"btree": btree_file, "data": data_file, "map": map_file}}
+
+        except (struct.error, IndexError):
+            # Skip malformed keyword index files
+            return {}
+
     def get_config_macros(self, config_number: int) -> List[str]:
         """
         Get all macros for a specific configuration number.
@@ -768,6 +846,93 @@ class HelpFile(BaseModel):
             "config_numbers": sorted(self.config_files.keys()),
             "config_stats": config_stats,
         }
+
+    def search_keyword_indices(self, char: str, keyword: str) -> List[int]:
+        """
+        Search for topic offsets associated with a keyword in keyword index files.
+
+        Args:
+            char: The character identifier (A-Z, a-z) for the keyword index type
+            keyword: The keyword to search for
+
+        Returns:
+            List of topic offsets where the keyword appears
+        """
+        if char not in self.keyword_index_files:
+            return []
+
+        files = self.keyword_index_files[char]
+        btree_file = files["btree"]
+        data_file = files["data"]
+
+        # Get keyword info from btree
+        keyword_info = btree_file.get_keyword_info(keyword)
+        if not keyword_info:
+            return []
+
+        # For GID format, topic offsets are stored directly in btree
+        if btree_file.is_gid_format:
+            return btree_file.get_topic_offsets_for_keyword(keyword)
+
+        # For standard format, use data file with offset and count
+        if hasattr(keyword_info, "kw_data_offset") and hasattr(keyword_info, "count"):
+            return data_file.get_topic_offsets_range(keyword_info.kw_data_offset, keyword_info.count)
+
+        return []
+
+    def get_all_keyword_indices(self, char: str) -> List[str]:
+        """
+        Get all keywords for a specific keyword index character type.
+
+        Args:
+            char: The character identifier (A-Z, a-z) for the keyword index type
+
+        Returns:
+            List of all keywords for the character type
+        """
+        if char not in self.keyword_index_files:
+            return []
+
+        btree_file = self.keyword_index_files[char]["btree"]
+        return btree_file.get_all_keywords()
+
+    def get_keyword_index_statistics(self) -> Dict[str, Any]:
+        """
+        Get statistics about all keyword index files.
+
+        Returns:
+            Dictionary with keyword index statistics
+        """
+        stats = {
+            "available_characters": list(self.keyword_index_files.keys()),
+            "total_character_sets": len(self.keyword_index_files),
+            "character_stats": {},
+        }
+
+        total_keywords = 0
+        total_references = 0
+
+        for char, files in self.keyword_index_files.items():
+            btree_stats = files["btree"].get_statistics()
+            data_stats = files["data"].get_statistics()
+            map_stats = files["map"].get_statistics()
+
+            char_stats = {
+                "keywords": btree_stats["total_keywords"],
+                "references": btree_stats.get("total_references", 0),
+                "data_offsets": data_stats["total_offsets"],
+                "map_entries": map_stats["total_entries"],
+                "is_gid_format": btree_stats["is_gid_format"],
+            }
+
+            stats["character_stats"][char] = char_stats
+            total_keywords += char_stats["keywords"]
+            total_references += char_stats["references"]
+
+        stats["total_keywords"] = total_keywords
+        stats["total_references"] = total_references
+
+        return stats
 
     def _parse_rose(self) -> RoseFile:
         """

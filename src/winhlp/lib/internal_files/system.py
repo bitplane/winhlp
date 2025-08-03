@@ -97,11 +97,14 @@ class SystemFile(InternalFile):
     cnt_filename: Optional[str] = None  # Type 10: CNT filename
     groups: list = []  # Type 13: GROUPS definitions
     dllmaps: list = []  # Type 19: DLLMAPS definitions
+    keyword_indices: list = []  # Characters that have keyword index files (from type 14 records)
     parent_hlp: Any = None
+    is_mvp: bool = False  # Is this a MultiMedia Viewer file?
 
     def __init__(self, parent_hlp=None, **data):
         super().__init__(**data)
         self.parent_hlp = parent_hlp
+        self.is_mvp = self._detect_mvp()
         self._parse()
 
     @model_serializer
@@ -110,6 +113,19 @@ class SystemFile(InternalFile):
         data = self.__dict__.copy()
         data.pop("parent_hlp", None)  # Remove circular reference
         return data
+
+    def _detect_mvp(self) -> bool:
+        """
+        Detects if this is a MultiMedia Viewer (MVP) file.
+        MVP files have extensions starting with 'M' (e.g., .MVB).
+        """
+        if self.parent_hlp and hasattr(self.parent_hlp, "filepath"):
+            import os
+
+            ext = os.path.splitext(self.parent_hlp.filepath)[1].upper()
+            # MVP files have extensions starting with 'M'
+            return len(ext) > 1 and ext[1] == "M"
+        return False
 
     def _parse(self):
         """
@@ -191,6 +207,8 @@ class SystemFile(InternalFile):
                 self._parse_groups(record_data)
             elif record_type == 14:  # KeyIndex
                 self._parse_key_index(record_data)
+            elif record_type == 18:  # LANGUAGE (0x0012)
+                self._parse_language(record_data)
             elif record_type == 19:  # DLLMAPS
                 self._parse_dllmaps(record_data)
             else:
@@ -292,6 +310,9 @@ class SystemFile(InternalFile):
 
         Can be either INDEX_SEPARATORS (string) or KEYINDEX (struct)
         depending on whether it's a multimedia file.
+
+        From C code: keyindex[SysRec->Data[1] - '0'] = TRUE;
+        This tracks which characters (A-Z, a-z) have keyword index files.
         """
         # Check if it's likely a KEYINDEX struct (110 bytes) or INDEX_SEPARATORS (string)
         if len(data) == 110:
@@ -317,28 +338,48 @@ class SystemFile(InternalFile):
                 "separators": separators,
             }
 
+            # Track keyword index character from C logic: keyindex[SysRec->Data[1] - '0'] = TRUE
+            # In MVP files, the second character indicates which keyword index this is
+            if len(data) >= 2 and self.is_mvp:
+                char = chr(data[1]) if 32 <= data[1] <= 126 else None
+                if char and char.isalnum() and char not in self.keyword_indices:
+                    self.keyword_indices.append(char)
+
         self.records.append(
             {"type": "KEYINDEX", "key_index_info": parsed_record, "raw_data": {"raw": data, "parsed": parsed_record}}
         )
 
     def _parse_def_font(self, data: bytes):
         """
-        Parses a DefFont record.
+        Parses a DefFont record (type 12).
+        In MVP files, this is FTINDEX data instead.
         """
-        if len(data) >= 3:
-            height_in_points, charset = struct.unpack("<HB", data[:3])
-            font_name = self._decode_text(data[3:].split(b"\x00")[0])
+        if self.is_mvp:
+            # FTINDEX format in MVP files
+            # From C code: printf("[FTINDEX] dtype %s\n", SysRec->Data);
+            ftindex_data = self._decode_text(data.split(b"\x00")[0])
+            parsed_record = {"ftindex_dtype": ftindex_data}
+            self.records.append(
+                {"type": "FTINDEX", "ftindex_dtype": ftindex_data, "raw_data": {"raw": data, "parsed": parsed_record}}
+            )
         else:
-            height_in_points = 0
-            charset = 0
-            font_name = ""
+            # Regular DEFFONT format
+            # From C code: printf("DEFFONT=%s,%d,%d\n", SysRec->Data+2, *(unsigned char*)SysRec->Data, *(unsigned char*)(SysRec->Data+1));
+            if len(data) >= 2:
+                font_size = data[0] if len(data) > 0 else 0
+                charset = data[1] if len(data) > 1 else 0
+                font_name = self._decode_text(data[2:].split(b"\x00")[0]) if len(data) > 2 else ""
+            else:
+                font_size = 0
+                charset = 0
+                font_name = ""
 
-        parsed_record = {
-            "height_in_points": height_in_points,
-            "charset": charset,
-            "font_name": font_name,
-        }
-        self.records.append(DefFont(**parsed_record, raw_data={"raw": data, "parsed": parsed_record}))
+            parsed_record = {
+                "height_in_points": font_size,
+                "charset": charset,
+                "font_name": font_name,
+            }
+            self.records.append(DefFont(**parsed_record, raw_data={"raw": data, "parsed": parsed_record}))
 
     def _decode_text(self, data: bytes) -> str:
         """
@@ -627,6 +668,18 @@ class SystemFile(InternalFile):
         self.records.append(
             {"type": "GROUPS", "group_definition": group_definition, "raw_data": {"raw": data, "parsed": parsed_record}}
         )
+
+    def _parse_language(self, data: bytes):
+        """
+        Parses a LANGUAGE record (type 18/0x0012).
+        From C code: if (SysRec->Data[0]) printf("LANGUAGE=%s\n", SysRec->Data);
+        """
+        if data and data[0]:  # Only process if first byte is non-zero
+            language = self._decode_text(data.split(b"\x00")[0])
+            parsed_record = {"language": language}
+            self.records.append(
+                {"type": "LANGUAGE", "language": language, "raw_data": {"raw": data, "parsed": parsed_record}}
+            )
 
     def _parse_dllmaps(self, data: bytes):
         """Parses a DLLMAPS record (record type 19)."""
