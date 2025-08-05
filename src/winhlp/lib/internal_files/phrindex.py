@@ -59,6 +59,8 @@ class PhrIndexFile(InternalFile):
             return
 
         self._parse_header()
+        # Note: phrase parsing is deferred until complete_phrase_parsing() is called
+        # after PhrImage has been created to avoid circular dependency
 
     def _parse_header(self):
         """Parses the PHRINDEXHDR structure."""
@@ -109,8 +111,20 @@ class PhrIndexFile(InternalFile):
             **parsed_header, raw_data={"raw": self.raw_data[start_offset:offset], "parsed": parsed_header}
         )
 
-        # Parse phrase index data following helldeco.c implementation
-        self._parse_phrase_data()
+        # Phrase parsing is deferred to avoid circular dependency with PhrImage
+
+    def complete_phrase_parsing(self, phrimage_file=None):
+        """Complete phrase parsing after PhrImage file is available.
+
+        Args:
+            phrimage_file: The PhrImageFile object containing decompressed phrase data
+        """
+        if phrimage_file and hasattr(phrimage_file, "decompressed_data"):
+            # Use the decompressed data from PhrImage
+            self._parse_hall_phrase_offsets(phrimage_file.decompressed_data)
+        else:
+            # Fallback to direct parsing (original behavior)
+            self._parse_phrase_data()
 
     def _parse_phrase_data(self):
         """Parse phrase data following helldeco.c PhraseLoad implementation"""

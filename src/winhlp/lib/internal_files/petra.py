@@ -10,7 +10,7 @@ Based on the helpdeco C reference implementation and documentation.
 
 import struct
 from typing import Dict, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .base import InternalFile
 from ..btree import BTree
@@ -37,12 +37,17 @@ class PetraFile(InternalFile):
     - Similar structure to |CONTEXT but with different data payload
     """
 
+    help_file: Optional[object] = Field(default=None, exclude=True)
+    entries: Dict[int, str] = {}  # topic_offset -> rtf_filename
+    btree: Optional[BTree] = None
+    petra_entries: List[PetraEntry] = []
+
     def __init__(self, data: bytes, help_file=None, **kwargs):
         super().__init__(raw_data=data, filename="|Petra", **kwargs)
         self.help_file = help_file
-        self.entries: Dict[int, str] = {}  # topic_offset -> rtf_filename
-        self.btree: Optional[BTree] = None
-        self.petra_entries: List[PetraEntry] = []
+        self.entries = {}
+        self.btree = None
+        self.petra_entries = []
         self._parse()
 
     def _parse(self):

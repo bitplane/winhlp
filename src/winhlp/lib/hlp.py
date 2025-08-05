@@ -199,6 +199,11 @@ class HelpFile(BaseModel):
         self.gmacros = self._parse_gmacros()
         self.phrindex = self._parse_phrindex()
         self.phrimage = self._parse_phrimage()
+
+        # Complete phrase parsing after both PhrIndex and PhrImage are available
+        if self.phrindex and self.phrimage:
+            self.phrindex.complete_phrase_parsing(self.phrimage)
+
         self.topicid = self._parse_topicid()
         self.ttlbtree = self._parse_ttlbtree()
         self.keyword_search_files = self._parse_keyword_search_files()

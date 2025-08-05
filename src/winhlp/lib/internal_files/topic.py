@@ -5,6 +5,50 @@ from pydantic import BaseModel
 from typing import List, Any, Optional, Tuple
 import struct
 from ..compression import decompress
+import warnings
+
+
+def safe_unpack_from(format_str: str, data: bytes, offset: int, default_value=None):
+    """Safely unpack struct data with bounds checking.
+
+    Args:
+        format_str: struct format string (e.g., "<H", "<L")
+        data: bytes to unpack from
+        offset: offset in data to start from
+        default_value: value to return if unpacking fails (None means raise exception)
+
+    Returns:
+        tuple: unpacked values or default_value on error
+
+    Raises:
+        struct.error: if bounds check fails and no default_value provided
+    """
+    required_size = struct.calcsize(format_str)
+    if offset + required_size > len(data):
+        if default_value is not None:
+            return default_value if isinstance(default_value, tuple) else (default_value,)
+        raise struct.error(f"Not enough data: need {required_size} bytes at offset {offset}, have {len(data) - offset}")
+
+    return struct.unpack_from(format_str, data, offset)
+
+
+def safe_unpack_single(format_str: str, data: bytes, offset: int, default_value=None):
+    """Safely unpack a single value with bounds checking.
+
+    Args:
+        format_str: struct format string (e.g., "<H", "<L")
+        data: bytes to unpack from
+        offset: offset in data to start from
+        default_value: value to return if unpacking fails (None means raise exception)
+
+    Returns:
+        single value or default_value on error
+
+    Raises:
+        struct.error: if bounds check fails and no default_value provided
+    """
+    result = safe_unpack_from(format_str, data, offset, default_value)
+    return result[0] if result else None
 
 
 class TopicBlockHeader(BaseModel):
@@ -846,7 +890,13 @@ class TopicFile(InternalFile):
             if len(raw_bytes) < 21:
                 break
 
-            block_size, data_len2, prev_block, next_block, data_len1, record_type = struct.unpack("<LLLLLb", raw_bytes)
+            try:
+                block_size, data_len2, prev_block, next_block, data_len1, record_type = struct.unpack(
+                    "<LLLLLb", raw_bytes
+                )
+            except struct.error as e:
+                warnings.warn(f"Failed to unpack TOPICLINK at offset {offset}: {e}")
+                break
             _link_offset = 21
 
             parsed_link = {
@@ -864,6 +914,29 @@ class TopicFile(InternalFile):
                 break
             if data_len1 > block_size:  # data_len1 cannot be larger than total block size
                 break
+
+            # Additional validation: check for reasonable values to prevent misalignment
+            if block_size > 32768:  # Unreasonably large block size (32KB limit)
+                break
+            if data_len2 > 1048576:  # Unreasonably large data_len2 (1MB limit)
+                break
+            if abs(next_block) > len(self.raw_data):  # Next block offset beyond file size
+                break
+
+            # Validate record type is one of the known values
+            if record_type not in [0x01, 0x02, 0x20, 0x23]:
+                # This indicates either parser misalignment or genuinely unimplemented record type
+                # Both should be treated as errors that need investigation
+                import binascii
+
+                data1_preview = binascii.hexlify(raw_bytes[:16]).decode() if len(raw_bytes) >= 16 else "short"
+
+                raise NotImplementedError(
+                    f"Unknown record type 0x{record_type:02X} at offset {offset}. "
+                    f"Block info: block_size={block_size}, data_len1={data_len1}, data_len2={data_len2}. "
+                    f"Raw bytes: {data1_preview}. "
+                    f"This may indicate parser misalignment or missing feature implementation."
+                )
 
             link = TopicLink(**parsed_link, raw_data={"raw": raw_bytes, "parsed": parsed_link})
 
@@ -1112,33 +1185,45 @@ class TopicFile(InternalFile):
             start_command_offset = offset
             if offset + 1 > len(data) or offset < 0:
                 break
-            command_byte = struct.unpack_from("<B", data, offset)[0]
-            offset += 1
+            try:
+                command_byte = safe_unpack_single("<B", data, offset, 0)
+                offset += 1
+            except struct.error:
+                warnings.warn(f"Insufficient data for command byte at offset {offset}, stopping formatting parse")
+                break
 
             # Basic formatting commands (from C reference code)
             if command_byte == 0x20:  # vfld MVB
                 if offset + 4 > len(data):
                     break
-                _vfld_number = struct.unpack_from("<l", data, offset)[
-                    0
-                ]  # MVB specific, properly handled in interleaved parser
-                offset += 4
+                try:
+                    _vfld_number = safe_unpack_single("<l", data, offset)
+                    offset += 4
+                except struct.error:
+                    warnings.warn(f"Insufficient data for vfld command at offset {offset}")
+                    break
                 # Skip for now - MVB specific
                 continue
             elif command_byte == 0x21:  # dtype MVB
                 if offset + 2 > len(data):
                     break
-                _dtype_number = struct.unpack_from("<h", data, offset)[
-                    0
-                ]  # MVB specific, properly handled in interleaved parser
-                offset += 2
+                try:
+                    _dtype_number = safe_unpack_single("<h", data, offset)
+                    offset += 2
+                except struct.error:
+                    warnings.warn(f"Insufficient data for dtype command at offset {offset}")
+                    break
                 # Skip for now - MVB specific
                 continue
             elif command_byte == 0x80:  # Font change
                 if offset + 2 > len(data):
                     break
-                font_number = struct.unpack_from("<h", data, offset)[0]
-                offset += 2
+                try:
+                    font_number = safe_unpack_single("<h", data, offset)
+                    offset += 2
+                except struct.error:
+                    warnings.warn(f"Insufficient data for font change command at offset {offset}")
+                    break
                 # TODO: Handle font change
                 continue
             elif command_byte == 0x81:  # Line break
