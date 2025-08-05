@@ -297,73 +297,70 @@ class HelpFile(BaseModel):
         dir_data = self.data[self.header.directory_start :]
         return Directory(data=dir_data)
 
+    def _load_internal_file(self, filename: str, parser_class, **kwargs):
+        """
+        Helper method to load and parse an internal file.
+
+        Centralizes the common pattern of:
+        1. Check if file exists in directory
+        2. Read file offset
+        3. Parse 9-byte FILEHEADER (reserved_space, used_space, file_flags)
+        4. Extract file content using used_space
+        5. Instantiate parser class with extracted data
+
+        Based on the C reference's SearchFile pattern in helldec1.c.
+
+        Args:
+            filename: Internal filename (e.g., "|SYSTEM", "|TOPIC")
+            parser_class: Parser class to instantiate
+            **kwargs: Additional arguments to pass to parser constructor
+
+        Returns:
+            Instantiated parser object or None if file doesn't exist
+        """
+        if filename not in self.directory.files:
+            return None
+
+        # Get file offset from directory
+        file_offset = self.directory.files[filename]
+
+        # Read and validate 9-byte FILEHEADER
+        file_header_data = self.data[file_offset : file_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+
+        # Parse FILEHEADER structure
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        # Extract file content
+        file_data = self.data[file_offset + 9 : file_offset + 9 + used_space]
+
+        # Instantiate parser with extracted data
+        return parser_class(filename=filename, raw_data=file_data, **kwargs)
+
     def _parse_system(self) -> SystemFile:
         """
         Parses the |SYSTEM internal file.
         """
-        if "|SYSTEM" not in self.directory.files:
-            return None
-
-        system_offset = self.directory.files["|SYSTEM"]
-        # We need to read the file header to know the size of the |SYSTEM file
-        file_header_data = self.data[system_offset : system_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        system_data = self.data[system_offset + 9 : system_offset + 9 + used_space]
-        return SystemFile(filename="|SYSTEM", raw_data=system_data, parent_hlp=self)
+        return self._load_internal_file("|SYSTEM", SystemFile, parent_hlp=self)
 
     def _parse_font(self) -> FontFile:
         """
         Parses the |FONT internal file.
         """
-        if "|FONT" not in self.directory.files:
-            return None
-
-        font_offset = self.directory.files["|FONT"]
-        # We need to read the file header to know the size of the |FONT file
-        file_header_data = self.data[font_offset : font_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        font_data = self.data[font_offset + 9 : font_offset + 9 + used_space]
-        return FontFile(filename="|FONT", raw_data=font_data, system_file=self.system)
+        return self._load_internal_file("|FONT", FontFile, system_file=self.system)
 
     def _parse_topic(self) -> TopicFile:
         """
         Parses the |TOPIC internal file.
         """
-        if "|TOPIC" not in self.directory.files:
-            return None
-
-        topic_offset = self.directory.files["|TOPIC"]
-        # We need to read the file header to know the size of the |TOPIC file
-        file_header_data = self.data[topic_offset : topic_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        topic_data = self.data[topic_offset + 9 : topic_offset + 9 + used_space]
-        return TopicFile(filename="|TOPIC", raw_data=topic_data, system_file=self.system)
+        return self._load_internal_file("|TOPIC", TopicFile, system_file=self.system)
 
     def _parse_context(self) -> ContextFile:
         """
         Parses the |CONTEXT internal file.
         """
-        if "|CONTEXT" not in self.directory.files:
-            return None
-
-        context_offset = self.directory.files["|CONTEXT"]
-        # We need to read the file header to know the size of the |CONTEXT file
-        file_header_data = self.data[context_offset : context_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        context_data = self.data[context_offset + 9 : context_offset + 9 + used_space]
-        return ContextFile(filename="|CONTEXT", raw_data=context_data)
+        return self._load_internal_file("|CONTEXT", ContextFile)
 
     def _parse_petra(self) -> PetraFile:
         """
@@ -406,35 +403,13 @@ class HelpFile(BaseModel):
         """
         Parses the |TOMAP internal file for Windows 3.0 help files.
         """
-        if "|TOMAP" not in self.directory.files:
-            return None
-
-        tomap_offset = self.directory.files["|TOMAP"]
-        # We need to read the file header to know the size of the |TOMAP file
-        file_header_data = self.data[tomap_offset : tomap_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        tomap_data = self.data[tomap_offset + 9 : tomap_offset + 9 + used_space]
-        return ToMapFile(filename="|TOMAP", raw_data=tomap_data)
+        return self._load_internal_file("|TOMAP", ToMapFile)
 
     def _parse_ctxomap(self) -> CtxoMapFile:
         """
         Parses the |CTXOMAP internal file.
         """
-        if "|CTXOMAP" not in self.directory.files:
-            return None
-
-        ctxomap_offset = self.directory.files["|CTXOMAP"]
-        # We need to read the file header to know the size of the |CTXOMAP file
-        file_header_data = self.data[ctxomap_offset : ctxomap_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        ctxomap_data = self.data[ctxomap_offset + 9 : ctxomap_offset + 9 + used_space]
-        return CtxoMapFile(filename="|CTXOMAP", raw_data=ctxomap_data)
+        return self._load_internal_file("|CTXOMAP", CtxoMapFile)
 
     def _parse_catalog(self) -> CatalogFile:
         """
@@ -443,81 +418,41 @@ class HelpFile(BaseModel):
         if "|CATALOG" not in self.directory.files:
             return None
 
-        catalog_offset = self.directory.files["|CATALOG"]
-        # We need to read the file header to know the size of the |CATALOG file
-        file_header_data = self.data[catalog_offset : catalog_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        catalog_data = self.data[catalog_offset + 9 : catalog_offset + 9 + used_space]
-        return CatalogFile(filename="|CATALOG", raw_data=catalog_data)
+        return self._load_internal_file("|CATALOG", CatalogFile)
 
     def _parse_viola(self) -> ViolaFile:
         """
         Parses the |VIOLA internal file.
         """
-        if "|VIOLA" not in self.directory.files:
-            return None
-
-        viola_offset = self.directory.files["|VIOLA"]
-        # We need to read the file header to know the size of the |VIOLA file
-        file_header_data = self.data[viola_offset : viola_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        viola_data = self.data[viola_offset + 9 : viola_offset + 9 + used_space]
-        return ViolaFile(filename="|VIOLA", raw_data=viola_data)
+        return self._load_internal_file("|VIOLA", ViolaFile)
 
     def _parse_gmacros(self) -> GMacrosFile:
         """
         Parses the |GMACROS internal file.
         """
-        if "|GMACROS" not in self.directory.files:
-            return None
-
-        gmacros_offset = self.directory.files["|GMACROS"]
-        # We need to read the file header to know the size of the |GMACROS file
-        file_header_data = self.data[gmacros_offset : gmacros_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        gmacros_data = self.data[gmacros_offset + 9 : gmacros_offset + 9 + used_space]
-        return GMacrosFile(filename="|GMACROS", raw_data=gmacros_data)
+        return self._load_internal_file("|GMACROS", GMacrosFile)
 
     def _parse_phrindex(self) -> PhrIndexFile:
         """
         Parses the |PhrIndex internal file.
         """
-        if "|PhrIndex" not in self.directory.files:
-            return None
-
-        phrindex_offset = self.directory.files["|PhrIndex"]
-        # We need to read the file header to know the size of the |PhrIndex file
-        file_header_data = self.data[phrindex_offset : phrindex_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        phrindex_data = self.data[phrindex_offset + 9 : phrindex_offset + 9 + used_space]
-        return PhrIndexFile(filename="|PhrIndex", raw_data=phrindex_data, system_file=self.system)
+        return self._load_internal_file("|PhrIndex", PhrIndexFile, system_file=self.system)
 
     def _parse_phrimage(self) -> PhrImageFile:
         """
         Parses the |PhrImage internal file.
+
+        Note: Uses full raw_data including file header for PhrImageFile.
         """
         if "|PhrImage" not in self.directory.files:
             return None
 
         phrimage_offset = self.directory.files["|PhrImage"]
-        # We need to read the file header to know the size of the |PhrImage file
         file_header_data = self.data[phrimage_offset : phrimage_offset + 9]
         if len(file_header_data) < 9:
             return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
         phrimage_data = self.data[phrimage_offset : phrimage_offset + 9 + used_space]
         return PhrImageFile(
             filename="|PhrImage", raw_data=phrimage_data, system_file=self.system, phr_index_file=self.phrindex
@@ -526,34 +461,36 @@ class HelpFile(BaseModel):
     def _parse_topicid(self) -> TopicIdFile:
         """
         Parses the |TopicId internal file.
+
+        Note: Uses full raw_data including file header for TopicIdFile.
         """
         if "|TopicId" not in self.directory.files:
             return None
 
         topicid_offset = self.directory.files["|TopicId"]
-        # We need to read the file header to know the size of the |TopicId file
         file_header_data = self.data[topicid_offset : topicid_offset + 9]
         if len(file_header_data) < 9:
             return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
         topicid_data = self.data[topicid_offset : topicid_offset + 9 + used_space]
         return TopicIdFile(filename="|TopicId", raw_data=topicid_data)
 
     def _parse_ttlbtree(self) -> TTLBTreeFile:
         """
         Parses the |TTLBTREE internal file.
+
+        Note: Uses full raw_data including file header for TTLBTreeFile.
         """
         if "|TTLBTREE" not in self.directory.files:
             return None
 
         ttlbtree_offset = self.directory.files["|TTLBTREE"]
-        # We need to read the file header to know the size of the |TTLBTREE file
         file_header_data = self.data[ttlbtree_offset : ttlbtree_offset + 9]
         if len(file_header_data) < 9:
             return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
         ttlbtree_data = self.data[ttlbtree_offset : ttlbtree_offset + 9 + used_space]
         return TTLBTreeFile(filename="|TTLBTREE", raw_data=ttlbtree_data)
 
@@ -1243,30 +1180,8 @@ class HelpFile(BaseModel):
 
     def _parse_cntjump(self) -> Optional[CntJumpFile]:
         """Parse the |CntJump internal file (GID files only)."""
-        if "|CntJump" not in self.directory.files:
-            return None
-
-        cntjump_offset = self.directory.files["|CntJump"]
-        file_header_data = self.data[cntjump_offset : cntjump_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-        cntjump_data = self.data[cntjump_offset + 9 : cntjump_offset + 9 + used_space]
-
-        return CntJumpFile(filename="|CntJump", raw_data=cntjump_data)
+        return self._load_internal_file("|CntJump", CntJumpFile)
 
     def _parse_cnttext(self) -> Optional[CntTextFile]:
         """Parse the |CntText internal file (GID files only)."""
-        if "|CntText" not in self.directory.files:
-            return None
-
-        cnttext_offset = self.directory.files["|CntText"]
-        file_header_data = self.data[cnttext_offset : cnttext_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-        cnttext_data = self.data[cnttext_offset + 9 : cnttext_offset + 9 + used_space]
-
-        return CntTextFile(filename="|CntText", raw_data=cnttext_data)
+        return self._load_internal_file("|CntText", CntTextFile)
