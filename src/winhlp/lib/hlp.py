@@ -26,6 +26,7 @@ from .internal_files.tomap import ToMapFile
 from .internal_files.petra import PetraFile
 from .internal_files.grp import GRPFile
 from .internal_files.chartab import ChartabFile
+from .internal_files.gid import WinPosFile, PeteFile, FlagsFile, CntJumpFile, CntTextFile
 from .exceptions import InvalidHLPFileError
 import struct
 
@@ -81,11 +82,23 @@ class HelpFile(BaseModel):
     petra: Optional[PetraFile] = None
     grp_files: Dict[str, GRPFile] = {}  # Maps filename -> GRPFile for .GRP files
     chartab_files: Dict[str, ChartabFile] = {}  # Maps filename -> ChartabFile for .tbl files
+    is_gid_file: bool = False  # True if this is a GID file created by WinHlp32
+
+    # GID-specific internal files
+    winpos: Optional[WinPosFile] = None
+    pete: Optional[PeteFile] = None
+    flags: Optional[FlagsFile] = None
+    cntjump: Optional[CntJumpFile] = None
+    cnttext: Optional[CntTextFile] = None
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
         with open(self.filepath, "rb") as f:
             self.data = f.read()
+
+        # Detect if this is a GID file based on extension
+        self.is_gid_file = filepath.lower().endswith(".gid")
+
         self.parse()
 
     def get_topics(self) -> List[ParsedTopic]:
@@ -212,6 +225,14 @@ class HelpFile(BaseModel):
         self.rose = self._parse_rose()
         self.petra = self._parse_petra()
         self.grp_files = self._parse_grp_files()
+
+        # Parse GID-specific files if this is a GID file
+        if self.is_gid_file:
+            self.winpos = self._parse_winpos()
+            self.pete = self._parse_pete()
+            self.flags = self._parse_flags()
+            self.cntjump = self._parse_cntjump()
+            self.cnttext = self._parse_cnttext()
         self.chartab_files = self._parse_chartab_files()
         self.bitmaps = self._parse_bitmaps()
 
@@ -1172,3 +1193,80 @@ class HelpFile(BaseModel):
             List of CHARTAB filenames
         """
         return list(self.chartab_files.keys())
+
+    # GID-specific file parsing methods
+
+    def _parse_winpos(self) -> Optional[WinPosFile]:
+        """Parse the |WinPos internal file (GID files only)."""
+        if "|WinPos" not in self.directory.files:
+            return None
+
+        winpos_offset = self.directory.files["|WinPos"]
+        file_header_data = self.data[winpos_offset : winpos_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+        winpos_data = self.data[winpos_offset + 9 : winpos_offset + 9 + used_space]
+
+        return WinPosFile(filename="|WinPos", raw_data=winpos_data)
+
+    def _parse_pete(self) -> Optional[PeteFile]:
+        """Parse the |Pete internal file (GID files only)."""
+        if "|Pete" not in self.directory.files:
+            return None
+
+        pete_offset = self.directory.files["|Pete"]
+        file_header_data = self.data[pete_offset : pete_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+        pete_data = self.data[pete_offset + 9 : pete_offset + 9 + used_space]
+
+        return PeteFile(filename="|Pete", raw_data=pete_data)
+
+    def _parse_flags(self) -> Optional[FlagsFile]:
+        """Parse the |Flags internal file (GID files only)."""
+        if "|Flags" not in self.directory.files:
+            return None
+
+        flags_offset = self.directory.files["|Flags"]
+        file_header_data = self.data[flags_offset : flags_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+        flags_data = self.data[flags_offset + 9 : flags_offset + 9 + used_space]
+
+        return FlagsFile(filename="|Flags", raw_data=flags_data)
+
+    def _parse_cntjump(self) -> Optional[CntJumpFile]:
+        """Parse the |CntJump internal file (GID files only)."""
+        if "|CntJump" not in self.directory.files:
+            return None
+
+        cntjump_offset = self.directory.files["|CntJump"]
+        file_header_data = self.data[cntjump_offset : cntjump_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+        cntjump_data = self.data[cntjump_offset + 9 : cntjump_offset + 9 + used_space]
+
+        return CntJumpFile(filename="|CntJump", raw_data=cntjump_data)
+
+    def _parse_cnttext(self) -> Optional[CntTextFile]:
+        """Parse the |CntText internal file (GID files only)."""
+        if "|CntText" not in self.directory.files:
+            return None
+
+        cnttext_offset = self.directory.files["|CntText"]
+        file_header_data = self.data[cnttext_offset : cnttext_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+        cnttext_data = self.data[cnttext_offset + 9 : cnttext_offset + 9 + used_space]
+
+        return CntTextFile(filename="|CntText", raw_data=cnttext_data)
