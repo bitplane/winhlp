@@ -969,8 +969,11 @@ class TopicFile(InternalFile):
                 binascii.hexlify(link_data2[:32]).decode() if link_data2 and len(link_data2) > 0 else "empty"
             )
 
-            raise NotImplementedError(
-                f"Unknown record type: 0x{link.record_type:02X}\n"
+            # Handle unknown record types gracefully
+            import warnings
+
+            warnings.warn(
+                f"Unknown record type: 0x{link.record_type:02X} - treating as generic unknown record\n"
                 f"  Link info: block_size={link.block_size}, data_len1={link.data_len1}, data_len2={link.data_len2}\n"
                 f"  LinkData1 preview (first 32 bytes): {data1_preview}\n"
                 f"  LinkData2 preview (first 32 bytes): {data2_preview}\n"
@@ -978,8 +981,26 @@ class TopicFile(InternalFile):
                 f"  0x01: TL_DISPLAY30 (Windows 3.0 displayable information)\n"
                 f"  0x02: TL_TOPICHDR (topic header)\n"
                 f"  0x20: TL_DISPLAY (Windows 3.1 displayable information)\n"
-                f"  0x23: TL_TABLE (Windows 3.1 table)"
+                f"  0x23: TL_TABLE (Windows 3.1 table)",
+                UserWarning,
             )
+
+            # Create a generic unknown record type entry
+            unknown_topic = ParsedTopic(
+                topic_number=len(self.parsed_topics),
+                topic_offset=self.topic_offset,
+                browse_sequence_number=None,
+                title="Unknown Record Type",
+                content_spans=[],
+                hotspot_mappings=[],
+                raw_data={
+                    "record_type": f"0x{link.record_type:02X}",
+                    "link_data1": link_data1.hex() if link_data1 else "",
+                    "link_data2": link_data2.hex() if link_data2 else "",
+                    "note": "Unknown record type handled gracefully",
+                },
+            )
+            self.parsed_topics.append(unknown_topic)
 
     def _parse_topic_header(self, data: bytes, before31: bool = False):
         """

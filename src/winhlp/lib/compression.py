@@ -152,12 +152,12 @@ def hall_decompress(data: bytes, phrases: List[str]) -> bytes:
                 phrase = phrases[phrase_num]
                 output.extend(phrase.encode("latin-1"))
         elif ch & 0x03 == 0x01:
-            # Least two bits are 01
+            # Least two bits are 01: multiply by 64, add 64 and next character
             if offset >= len(data):
                 break
             next_ch = data[offset]
             offset += 1
-            phrase_num = 128 + (ch // 4) * 256 + next_ch
+            phrase_num = (ch // 4) * 64 + 64 + next_ch
             if 0 <= phrase_num < len(phrases):
                 phrase = phrases[phrase_num]
                 output.extend(phrase.encode("latin-1"))
