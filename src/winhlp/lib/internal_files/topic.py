@@ -923,20 +923,14 @@ class TopicFile(InternalFile):
             if abs(next_block) > len(self.raw_data):  # Next block offset beyond file size
                 break
 
-            # Validate record type is one of the known values
+            # Only process known record types, skip unknown ones (like C reference does)
             if record_type not in [0x01, 0x02, 0x20, 0x23]:
-                # This indicates either parser misalignment or genuinely unimplemented record type
-                # Both should be treated as errors that need investigation
-                import binascii
-
-                data1_preview = binascii.hexlify(raw_bytes[:16]).decode() if len(raw_bytes) >= 16 else "short"
-
-                raise NotImplementedError(
-                    f"Unknown record type 0x{record_type:02X} at offset {offset}. "
-                    f"Block info: block_size={block_size}, data_len1={data_len1}, data_len2={data_len2}. "
-                    f"Raw bytes: {data1_preview}. "
-                    f"This may indicate parser misalignment or missing feature implementation."
-                )
+                # Skip unknown record types silently (C reference behavior)
+                # Move to next block or exit if we can't find a valid next position
+                if block_size == 0:
+                    break
+                offset += block_size
+                continue
 
             link = TopicLink(**parsed_link, raw_data={"raw": raw_bytes, "parsed": parsed_link})
 
