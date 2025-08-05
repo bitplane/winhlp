@@ -357,10 +357,21 @@ class SystemFile(InternalFile):
         if self.is_mvp:
             # FTINDEX format in MVP files
             # From C code: printf("[FTINDEX] dtype %s\n", SysRec->Data);
-            ftindex_data = self._decode_text(data.split(b"\x00")[0])
-            parsed_record = {"ftindex_dtype": ftindex_data}
+            # Parse as space-separated tokens
+            ftindex_str = self._decode_text(data.split(b"\x00")[0])
+            tokens = ftindex_str.split(" ")
+
+            dtype_name = tokens[0] if tokens else ""
+            dtype_path = tokens[1] if len(tokens) > 1 else ""
+
+            parsed_record = {
+                "ftindex_dtype": ftindex_str,
+                "dtype_name": dtype_name,
+                "dtype_path": dtype_path,
+                "tokens": tokens,
+            }
             self.records.append(
-                {"type": "FTINDEX", "ftindex_dtype": ftindex_data, "raw_data": {"raw": data, "parsed": parsed_record}}
+                {"type": "FTINDEX", "ftindex_dtype": ftindex_str, "raw_data": {"raw": data, "parsed": parsed_record}}
             )
         else:
             # Regular DEFFONT format
@@ -661,13 +672,42 @@ class SystemFile(InternalFile):
 
     def _parse_groups(self, data: bytes):
         """Parses a GROUPS record (record type 13)."""
-        # GROUP definition - null-terminated string
-        group_definition = self._decode_text(data.split(b"\x00")[0])
-        self.groups.append(group_definition)
-        parsed_record = {"group_definition": group_definition}
-        self.records.append(
-            {"type": "GROUPS", "group_definition": group_definition, "raw_data": {"raw": data, "parsed": parsed_record}}
-        )
+        if self.is_mvp:
+            # MVB GROUPS format
+            # From C code: if (mvp) printf("[GROUPS] %s\n", SysRec->Data);
+            group_definition = self._decode_text(data.split(b"\x00")[0])
+
+            # Parse group definition: "filename description"
+            parts = group_definition.split(" ", 1)
+            group_filename = parts[0] if parts else ""
+            group_description = parts[1] if len(parts) > 1 else ""
+
+            self.groups.append(group_definition)
+            parsed_record = {
+                "group_definition": group_definition,
+                "group_filename": group_filename,
+                "group_description": group_description,
+                "is_mvp": True,
+            }
+            self.records.append(
+                {
+                    "type": "GROUPS",
+                    "group_definition": group_definition,
+                    "raw_data": {"raw": data, "parsed": parsed_record},
+                }
+            )
+        else:
+            # Regular GROUPS format (rarely used in non-MVB files)
+            group_definition = self._decode_text(data.split(b"\x00")[0])
+            self.groups.append(group_definition)
+            parsed_record = {"group_definition": group_definition, "is_mvp": False}
+            self.records.append(
+                {
+                    "type": "GROUPS",
+                    "group_definition": group_definition,
+                    "raw_data": {"raw": data, "parsed": parsed_record},
+                }
+            )
 
     def _parse_language(self, data: bytes):
         """
@@ -722,3 +762,109 @@ class SystemFile(InternalFile):
             "win32_debug_dll": strings[3],
         }
         self.records.append({"type": "DLLMAPS", "dllmap": dllmap, "raw_data": {"raw": data, "parsed": parsed_record}})
+
+    def _parse_charset(self, data: bytes):
+        """
+        Parses a CHARSET record (record type 11).
+        From C code: if(!mvp) printf("CHARSET=%d\n",*(unsigned char *)(SysRec->Data+1));
+        """
+        if not self.is_mvp and len(data) > 1:
+            charset_id = data[1] if len(data) > 1 else 0
+            parsed_record = {"charset_id": charset_id}
+            self.records.append(
+                {"type": "CHARSET", "charset_id": charset_id, "raw_data": {"raw": data, "parsed": parsed_record}}
+            )
+
+    def _parse_key_index(self, data: bytes):
+        """
+        Parses a KEYINDEX record (record type 14).
+        In MVB files, this contains keyword index information.
+        """
+        if self.is_mvp:
+            # MVB KEYINDEX format
+            # From C code: printf("[KEYINDEX] keyword=%c, \"%s\"\n", SysRec->Data[1], SysRec->Data + 30);
+            if len(data) > 30:
+                keyword_char = chr(data[1]) if len(data) > 1 else ""
+                keyword_string = self._decode_text(data[30:].split(b"\x00")[0]) if len(data) > 30 else ""
+
+                parsed_record = {"keyword_char": keyword_char, "keyword_string": keyword_string, "is_mvp": True}
+                self.records.append(
+                    {
+                        "type": "KEYINDEX",
+                        "key_index_info": parsed_record,
+                        "raw_data": {"raw": data, "parsed": parsed_record},
+                    }
+                )
+        else:
+            # Regular KEYINDEX format (INDEX_SEPARATORS)
+            # From C code: printf("INDEX_SEPARATORS=\"%s\"\n", SysRec->Data);
+            index_separators = self._decode_text(data.split(b"\x00")[0])
+            parsed_record = {"index_separators": index_separators, "is_mvp": False}
+            self.records.append(
+                {
+                    "type": "KEYINDEX",
+                    "index_separators": index_separators,
+                    "raw_data": {"raw": data, "parsed": parsed_record},
+                }
+            )
+
+    def _parse_macro(self, data: bytes):
+        """
+        Parses a MACRO record (record type 4).
+        From C code: printf("[MACRO] %s\n", SysRec->Data);
+        """
+        macro_string = self._decode_text(data.split(b"\x00")[0])
+        parsed_record = {"macro_string": macro_string}
+        self.records.append(
+            {"type": "MACRO", "macro_string": macro_string, "raw_data": {"raw": data, "parsed": parsed_record}}
+        )
+
+    def _parse_icon(self, data: bytes):
+        """
+        Parses an ICON record (record type 5).
+        Contains binary icon data.
+        """
+        parsed_record = {"icon_size": len(data), "has_icon_data": len(data) > 0}
+        self.records.append({"type": "ICON", "icon_data": data, "raw_data": {"raw": data, "parsed": parsed_record}})
+
+    def _parse_citation(self, data: bytes):
+        """
+        Parses a CITATION record (record type 8).
+        From C code: printf("CITATION=%s\n", SysRec->Data);
+        """
+        citation = self._decode_text(data.split(b"\x00")[0])
+        parsed_record = {"citation": citation}
+        self.records.append(
+            {"type": "CITATION", "citation": citation, "raw_data": {"raw": data, "parsed": parsed_record}}
+        )
+
+    def _parse_lcid(self, data: bytes):
+        """
+        Parses an LCID (Locale ID) record (record type 9).
+        From C code: if (!mvp) printf("LCID=0x%X 0x%X 0x%X\n", *(int16_t*)(SysRec->Data+8), *(int16_t*)SysRec->Data, *(int16_t*)(SysRec->Data+2));
+        """
+        if not self.is_mvp and len(data) >= 10:
+            # Extract three 16-bit values from specific offsets
+            try:
+                lcid1 = struct.unpack_from("<H", data, 0)[0] if len(data) >= 2 else 0
+                lcid2 = struct.unpack_from("<H", data, 2)[0] if len(data) >= 4 else 0
+                lcid3 = struct.unpack_from("<H", data, 8)[0] if len(data) >= 10 else 0
+
+                parsed_record = {
+                    "lcid1": lcid1,
+                    "lcid2": lcid2,
+                    "lcid3": lcid3,
+                    "lcid1_hex": f"0x{lcid1:X}",
+                    "lcid2_hex": f"0x{lcid2:X}",
+                    "lcid3_hex": f"0x{lcid3:X}",
+                    "is_mvp": False,
+                }
+                self.records.append(
+                    {"type": "LCID", "lcid_info": parsed_record, "raw_data": {"raw": data, "parsed": parsed_record}}
+                )
+            except struct.error:
+                # Handle malformed LCID data
+                parsed_record = {"error": "Malformed LCID data", "size": len(data)}
+                self.records.append(
+                    {"type": "LCID", "lcid_info": parsed_record, "raw_data": {"raw": data, "parsed": parsed_record}}
+                )

@@ -25,6 +25,7 @@ from .internal_files.bitmap import BitmapFile
 from .internal_files.tomap import ToMapFile
 from .internal_files.petra import PetraFile
 from .internal_files.grp import GRPFile
+from .internal_files.chartab import ChartabFile
 from .exceptions import InvalidHLPFileError
 import struct
 
@@ -79,6 +80,7 @@ class HelpFile(BaseModel):
     rose: Optional[RoseFile] = None
     petra: Optional[PetraFile] = None
     grp_files: Dict[str, GRPFile] = {}  # Maps filename -> GRPFile for .GRP files
+    chartab_files: Dict[str, ChartabFile] = {}  # Maps filename -> ChartabFile for .tbl files
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
@@ -205,6 +207,7 @@ class HelpFile(BaseModel):
         self.rose = self._parse_rose()
         self.petra = self._parse_petra()
         self.grp_files = self._parse_grp_files()
+        self.chartab_files = self._parse_chartab_files()
         self.bitmaps = self._parse_bitmaps()
 
     def _parse_header(self) -> HLPHeader:
@@ -1070,3 +1073,97 @@ class HelpFile(BaseModel):
                     continue
 
         return grp_files
+
+    def _parse_chartab_files(self) -> Dict[str, ChartabFile]:
+        """
+        Parse all CHARTAB (Character Mapping Table) files in the directory.
+
+        CHARTAB files end with .tbl extension and contain character mapping
+        information for fonts in MediaView files.
+        """
+        chartab_files = {}
+
+        if not self.directory:
+            return chartab_files
+
+        # Find all files ending with .tbl
+        for filename in self.directory.files:
+            if filename.upper().endswith(".TBL"):
+                try:
+                    file_offset = self.directory.files[filename]
+
+                    # Read file header to get size
+                    file_header_data = self.data[file_offset : file_offset + 9]
+                    if len(file_header_data) < 9:
+                        continue
+
+                    reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+                    # Extract CHARTAB file data
+                    chartab_data = self.data[file_offset + 9 : file_offset + 9 + used_space]
+
+                    # Create CHARTAB file instance
+                    chartab_file = ChartabFile(chartab_data, help_file=self)
+                    chartab_files[filename] = chartab_file
+
+                except (struct.error, IndexError, ValueError):
+                    # Skip malformed CHARTAB files
+                    continue
+
+        return chartab_files
+
+    def get_character_mapping(self, filename: str, char_code: int) -> Optional[dict]:
+        """
+        Get character mapping information for a specific character code from a CHARTAB file.
+
+        Args:
+            filename: The CHARTAB filename (e.g., "ANSI.TBL")
+            char_code: The character code to look up
+
+        Returns:
+            Dictionary with character mapping information, or None if not found
+        """
+        if filename in self.chartab_files:
+            return self.chartab_files[filename].get_character_mapping(char_code)
+        return None
+
+    def get_all_character_mappings(self, filename: str) -> Dict[int, dict]:
+        """
+        Get all character mappings from a CHARTAB file.
+
+        Args:
+            filename: The CHARTAB filename (e.g., "ANSI.TBL")
+
+        Returns:
+            Dictionary mapping character codes to mapping information
+        """
+        if filename in self.chartab_files:
+            return self.chartab_files[filename].get_all_mappings()
+        return {}
+
+    def get_chartab_statistics(self) -> Dict[str, Any]:
+        """
+        Get statistics about all CHARTAB files.
+
+        Returns:
+            Dictionary with CHARTAB file statistics
+        """
+        if not self.chartab_files:
+            return {"total_chartab_files": 0, "files": {}}
+
+        stats = {"total_chartab_files": len(self.chartab_files), "files": {}}
+
+        for filename, chartab_file in self.chartab_files.items():
+            file_stats = chartab_file.get_statistics()
+            stats["files"][filename] = file_stats
+
+        return stats
+
+    def get_available_chartab_files(self) -> List[str]:
+        """
+        Get list of available CHARTAB filenames.
+
+        Returns:
+            List of CHARTAB filenames
+        """
+        return list(self.chartab_files.keys())

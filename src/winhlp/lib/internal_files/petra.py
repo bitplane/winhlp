@@ -12,7 +12,7 @@ import struct
 from typing import Dict, List, Optional
 from pydantic import BaseModel
 
-from .internal_file import InternalFile
+from .base import InternalFile
 from ..btree import BTree
 
 
@@ -37,8 +37,9 @@ class PetraFile(InternalFile):
     - Similar structure to |CONTEXT but with different data payload
     """
 
-    def __init__(self, data: bytes, help_file=None):
-        super().__init__(data, help_file)
+    def __init__(self, data: bytes, help_file=None, **kwargs):
+        super().__init__(raw_data=data, filename="|Petra", **kwargs)
+        self.help_file = help_file
         self.entries: Dict[int, str] = {}  # topic_offset -> rtf_filename
         self.btree: Optional[BTree] = None
         self.petra_entries: List[PetraEntry] = []
@@ -46,12 +47,12 @@ class PetraFile(InternalFile):
 
     def _parse(self):
         """Parse the |Petra file structure."""
-        if len(self.data) < 4:
+        if len(self.raw_data) < 4:
             return
 
         try:
             # Initialize B+ tree for Petra file
-            self.btree = BTree(self.data)
+            self.btree = BTree(self.raw_data)
 
             # Parse all leaf nodes to extract topic offset -> filename mappings
             self._parse_leaf_nodes()
@@ -128,10 +129,10 @@ class PetraFile(InternalFile):
         """Fallback parsing method for non-B+ tree Petra files."""
         offset = 0
 
-        while offset + 8 < len(self.data):
+        while offset + 8 < len(self.raw_data):
             try:
                 # Try to find topic offset pattern (4 bytes)
-                topic_offset = struct.unpack_from("<L", self.data, offset)[0]
+                topic_offset = struct.unpack_from("<L", self.raw_data, offset)[0]
 
                 # Skip obviously invalid offsets
                 if topic_offset == 0 or topic_offset > 0x10000000:
@@ -142,11 +143,11 @@ class PetraFile(InternalFile):
 
                 # Look for null-terminated string after offset
                 filename_start = offset
-                while offset < len(self.data) and self.data[offset] != 0x00:
+                while offset < len(self.raw_data) and self.raw_data[offset] != 0x00:
                     offset += 1
 
-                if offset > filename_start and offset < len(self.data):
-                    rtf_filename = self.data[filename_start:offset].decode("cp1252", errors="replace")
+                if offset > filename_start and offset < len(self.raw_data):
+                    rtf_filename = self.raw_data[filename_start:offset].decode("cp1252", errors="replace")
                     offset += 1  # Skip null terminator
 
                     # Only add if filename looks reasonable
@@ -183,7 +184,7 @@ class PetraFile(InternalFile):
         return {
             "total_mappings": len(self.entries),
             "has_btree": self.btree is not None,
-            "raw_data_size": len(self.data),
+            "raw_data_size": len(self.raw_data),
             "unique_filenames": len(set(self.entries.values())),
             "topic_offset_range": {
                 "min": min(self.entries.keys()) if self.entries else None,

@@ -12,7 +12,7 @@ import struct
 from typing import List, Optional, Dict
 from pydantic import BaseModel
 
-from .internal_file import InternalFile
+from .base import InternalFile
 
 
 class GroupHeader(BaseModel):

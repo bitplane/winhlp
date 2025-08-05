@@ -660,18 +660,46 @@ class FontFile(InternalFile):
             offset = end_of_string + 1
         # Parse .tbl files referenced in charmaps
         # Based on helpdeco.c FontLoad function
-        for charmap in self.charmaps:
-            if not charmap or charmap == "|MVCHARTAB,0":
+        for charmap_info in self.charmaps:
+            if not charmap_info:
                 continue
 
-            # Extract the charmap name (before the comma)
-            charmap_name = charmap.split(",")[0] if "," in charmap else charmap
+            # Handle both old string format and new dict format
+            if isinstance(charmap_info, dict):
+                charmap_name = charmap_info.get("filename", "")
+                if not charmap_name or charmap_name == "|MVCHARTAB":
+                    continue
+            elif isinstance(charmap_info, str):
+                if not charmap_info or charmap_info == "|MVCHARTAB,0":
+                    continue
+                # Extract the charmap name (before the comma)
+                charmap_name = charmap_info.split(",")[0] if "," in charmap_info else charmap_info
+            else:
+                continue
 
-            # Try to find this charmap as an internal file in the help file
-            if self.parent_hlp and self.parent_hlp.directory is not None:
-                charmap_data = self._get_internal_file_data(charmap_name)
-                if charmap_data:
-                    self._parse_charmap_file(charmap_name, charmap_data)
+            # Try to find this charmap in the integrated CHARTAB files first
+            if (
+                hasattr(self, "parent_hlp")
+                and self.parent_hlp
+                and hasattr(self.parent_hlp, "chartab_files")
+                and charmap_name in self.parent_hlp.chartab_files
+            ):
+                # Use the integrated CHARTAB file
+                chartab_file = self.parent_hlp.chartab_files[charmap_name]
+                if chartab_file.header and chartab_file.header.magic == 0x5555:
+                    # Store reference to the integrated CHARTAB file
+                    self.parsed_charmaps[charmap_name] = {
+                        "header": chartab_file.header,
+                        "entries": chartab_file.char_entries,
+                        "ligatures": chartab_file.ligatures,
+                        "character_mapping": chartab_file.character_mapping,
+                    }
+            else:
+                # Fall back to manual parsing as before
+                if self.parent_hlp and self.parent_hlp.directory is not None:
+                    charmap_data = self._get_internal_file_data(charmap_name)
+                    if charmap_data:
+                        self._parse_charmap_file(charmap_name, charmap_data)
 
     def _get_internal_file_data(self, filename: str) -> Optional[bytes]:
         """
@@ -775,3 +803,72 @@ class FontFile(InternalFile):
 
         # Store the parsed charmap data
         self.parsed_charmaps[filename] = {"header": charmap_header, "entries": charmap_entries}
+
+    def _parse_charmaps(self):
+        """
+        Parses character mapping table references from the |FONT file.
+
+        From the documentation: If FacenamesOffset is at least 16, the |FONT file supports
+        character mapping tables. The array of character mapping table file names is located
+        in |FONT at CharMapTableOffset and contains strings of the internal filename of the
+        character mapping table concatenated with ',' and the character mapping table number.
+        """
+        if not self.header or self.header.facenames_offset < 16:
+            # Character mapping tables not supported in this format
+            return
+
+        if self.header.num_charmaps == 0 or self.header.charmaps_offset == 0:
+            # No character mapping tables defined
+            return
+
+        offset = self.header.charmaps_offset
+
+        # Each charmap table name is up to 32 bytes
+        entry_size = 32
+
+        for i in range(self.header.num_charmaps):
+            if offset + entry_size > len(self.raw_data):
+                break
+
+            # Read 32-byte entry
+            charmap_entry_data = self.raw_data[offset : offset + entry_size]
+
+            # Find null terminator or use full length
+            null_pos = charmap_entry_data.find(b"\x00")
+            if null_pos != -1:
+                charmap_name_data = charmap_entry_data[:null_pos]
+            else:
+                charmap_name_data = charmap_entry_data.rstrip(b"\x00")
+
+            if not charmap_name_data:
+                offset += entry_size
+                continue
+
+            try:
+                charmap_entry_str = charmap_name_data.decode("cp1252", errors="replace")
+
+                # Parse "filename,number" format
+                if "," in charmap_entry_str:
+                    filename, number_str = charmap_entry_str.split(",", 1)
+                    try:
+                        charmap_number = int(number_str)
+                    except ValueError:
+                        charmap_number = 0
+                else:
+                    filename = charmap_entry_str
+                    charmap_number = 0
+
+                charmap_info = {
+                    "filename": filename,
+                    "charmap_number": charmap_number,
+                    "entry_string": charmap_entry_str,
+                    "raw_data": charmap_entry_data,
+                }
+
+                self.charmaps.append(charmap_info)
+
+            except UnicodeDecodeError:
+                # Skip malformed entries
+                pass
+
+            offset += entry_size
