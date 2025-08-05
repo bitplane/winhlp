@@ -963,44 +963,35 @@ class TopicFile(InternalFile):
             import binascii
 
             data1_preview = (
-                binascii.hexlify(link_data1[:32]).decode() if link_data1 and len(link_data1) > 0 else "empty"
+                binascii.hexlify(link_data1[:64]).decode() if link_data1 and len(link_data1) > 0 else "empty"
             )
             data2_preview = (
-                binascii.hexlify(link_data2[:32]).decode() if link_data2 and len(link_data2) > 0 else "empty"
+                binascii.hexlify(link_data2[:64]).decode() if link_data2 and len(link_data2) > 0 else "empty"
             )
 
-            # Handle unknown record types gracefully
-            import warnings
+            # Collect diagnostic information
+            diagnostics = [
+                f"Unknown record type: 0x{link.record_type:02X}",
+                f"Block info: block_size={link.block_size}, data_len1={link.data_len1}, data_len2={link.data_len2}",
+                f"NextBlock: {link.next_block}",
+                f"LinkData1 preview (first 64 bytes): {data1_preview}",
+                f"LinkData2 preview (first 64 bytes): {data2_preview}",
+                "",
+                "Known record types:",
+                "  0x01: TL_DISPLAY30 (Windows 3.0 displayable information)",
+                "  0x02: TL_TOPICHDR (topic header)",
+                "  0x20: TL_DISPLAY (Windows 3.1 displayable information)",
+                "  0x23: TL_TABLE (Windows 3.1 table)",
+                "",
+                "Possible causes:",
+                "  - New undocumented record type",
+                "  - Parser misalignment (reading data at wrong offset)",
+                "  - Corrupted help file",
+                "  - Different help file version with extended record types",
+            ]
 
-            warnings.warn(
-                f"Unknown record type: 0x{link.record_type:02X} - treating as generic unknown record\n"
-                f"  Link info: block_size={link.block_size}, data_len1={link.data_len1}, data_len2={link.data_len2}\n"
-                f"  LinkData1 preview (first 32 bytes): {data1_preview}\n"
-                f"  LinkData2 preview (first 32 bytes): {data2_preview}\n"
-                f"Known record types:\n"
-                f"  0x01: TL_DISPLAY30 (Windows 3.0 displayable information)\n"
-                f"  0x02: TL_TOPICHDR (topic header)\n"
-                f"  0x20: TL_DISPLAY (Windows 3.1 displayable information)\n"
-                f"  0x23: TL_TABLE (Windows 3.1 table)",
-                UserWarning,
-            )
-
-            # Create a generic unknown record type entry
-            unknown_topic = ParsedTopic(
-                topic_number=len(self.parsed_topics),
-                topic_offset=self.topic_offset,
-                browse_sequence_number=None,
-                title="Unknown Record Type",
-                content_spans=[],
-                hotspot_mappings=[],
-                raw_data={
-                    "record_type": f"0x{link.record_type:02X}",
-                    "link_data1": link_data1.hex() if link_data1 else "",
-                    "link_data2": link_data2.hex() if link_data2 else "",
-                    "note": "Unknown record type handled gracefully",
-                },
-            )
-            self.parsed_topics.append(unknown_topic)
+            # Fail loudly during development
+            raise NotImplementedError("\n".join(diagnostics))
 
     def _parse_topic_header(self, data: bytes, before31: bool = False):
         """
@@ -1658,11 +1649,36 @@ class TopicFile(InternalFile):
                 # These are already handled above in the existing code
                 pass
             else:
-                # Unknown command byte - create diagnostic exception like topic parsing
-                raise NotImplementedError(
-                    f"Unknown formatting command 0x{command_byte:02X} at offset {start_command_offset}. "
-                )
-                # break
+                # Unknown formatting command - provide detailed diagnostics
+                context_data = data[max(0, start_command_offset - 16) : start_command_offset + 16]
+                context_hex = context_data.hex()
+
+                diagnostics = [
+                    f"Unknown formatting command: 0x{command_byte:02X} at offset {start_command_offset}",
+                    f"Context (32 bytes around command): {context_hex}",
+                    f"Command position marked with > <: {context_hex[:32]}>0x{command_byte:02X}<{context_hex[34:]}",
+                    "",
+                    "Known formatting commands:",
+                    "  0x00: End of commands",
+                    "  0x20: vfld (variable field)",
+                    "  0x21: dtype (data type - MediaView)",
+                    "  0x80: Font change",
+                    "  0x81: Line break",
+                    "  0x82: Paragraph break",
+                    "  0x83: Tab",
+                    "  0x86, 0x87, 0x88: Embedded/bitmap commands",
+                    "  0xC8, 0xCC: Macro commands",
+                    "  0xE2-0xE3, 0xE6-0xE7: Internal jumps",
+                    "  0xEA-0xEB, 0xEE-0xEF: External jumps",
+                    "  0xFF: End of character formatting",
+                    "",
+                    "This may indicate:",
+                    "  - Newer help file format with extended commands",
+                    "  - Parser misalignment",
+                    "  - Corrupted formatting data",
+                ]
+
+                raise NotImplementedError("\n".join(diagnostics))
 
     def _parse_paragraph_info(self, data: bytes):
         """
@@ -1921,21 +1937,30 @@ class TopicFile(InternalFile):
         while linkdata2_ptr < len(raw_linkdata2) and linkdata1_ptr < len(linkdata1):
             # 1. Read complete null-terminated string from LinkData2
             string_start = linkdata2_ptr
+            # Safe string reading with bounds checking
             while linkdata2_ptr < len(raw_linkdata2) and raw_linkdata2[linkdata2_ptr] != 0x00:
                 linkdata2_ptr += 1
 
             # Process the string (add to current text accumulation)
-            if string_start < linkdata2_ptr:
-                current_text_bytes.extend(raw_linkdata2[string_start:linkdata2_ptr])
+            if string_start < linkdata2_ptr and linkdata2_ptr <= len(raw_linkdata2):
+                try:
+                    current_text_bytes.extend(raw_linkdata2[string_start:linkdata2_ptr])
+                except IndexError:
+                    # If we get an IndexError, something is wrong with our bounds - skip this string
+                    break
 
-            # Skip null terminator
+            # Skip null terminator with bounds check
             if linkdata2_ptr < len(raw_linkdata2):
                 linkdata2_ptr += 1
 
             # 2. After processing string, read formatting command from LinkData1
             if linkdata1_ptr < len(linkdata1):
-                command_byte = linkdata1[linkdata1_ptr]
-                linkdata1_ptr += 1
+                try:
+                    command_byte = linkdata1[linkdata1_ptr]
+                    linkdata1_ptr += 1
+                except IndexError:
+                    # Bounds error reading command byte - exit parsing
+                    break
 
                 if command_byte == 0xFF:  # End of character formatting
                     break
@@ -1944,8 +1969,12 @@ class TopicFile(InternalFile):
                 elif command_byte == 0x80:  # Font change
                     if linkdata1_ptr + 1 < len(linkdata1):
                         finish_current_span()
-                        current_font = struct.unpack_from("<h", linkdata1, linkdata1_ptr)[0]
-                        linkdata1_ptr += 2
+                        try:
+                            current_font = struct.unpack_from("<h", linkdata1, linkdata1_ptr)[0]
+                            linkdata1_ptr += 2
+                        except (struct.error, IndexError):
+                            # Skip malformed font change command
+                            linkdata1_ptr = min(linkdata1_ptr + 2, len(linkdata1))
                 elif command_byte == 0x81:  # Line break
                     finish_current_span()
                     current_text_bytes.extend(b"\n")
@@ -1969,49 +1998,80 @@ class TopicFile(InternalFile):
                 elif command_byte in [0x86, 0x87, 0x88]:  # Embedded/bitmap positioning commands
                     if linkdata1_ptr < len(linkdata1):
                         finish_current_span()
-                        _x3 = linkdata1[linkdata1_ptr]  # First byte after command - unused in current implementation
-                        linkdata1_ptr += 1
-
-                        if linkdata1_ptr < len(linkdata1):
-                            x1 = linkdata1[linkdata1_ptr]  # Second byte after command
+                        try:
+                            _x3 = linkdata1[
+                                linkdata1_ptr
+                            ]  # First byte after command - unused in current implementation
                             linkdata1_ptr += 1
 
-                            # Determine command type based on C reference code
-                            alignment = {0x86: "center", 0x87: "left", 0x88: "right"}[command_byte]
-                            if x1 == 0x05:
-                                # Embedded window commands
-                                current_formatting["embedded_image"] = f"window:{alignment}"
+                            if linkdata1_ptr < len(linkdata1):
+                                x1 = linkdata1[linkdata1_ptr]  # Second byte after command
+                                linkdata1_ptr += 1
+
+                                # Determine command type based on C reference code
+                                alignment = {0x86: "center", 0x87: "left", 0x88: "right"}[command_byte]
                             else:
-                                # Bitmap commands
-                                current_formatting["embedded_image"] = f"bitmap:{alignment}"
+                                # Incomplete command, skip
+                                continue
+                        except IndexError:
+                            # Skip malformed embedded command
+                            linkdata1_ptr = min(linkdata1_ptr + 1, len(linkdata1))
+                            continue
 
-                            # Read compressed picture size
+                        # Process embedded command if we got here successfully
+                        if x1 == 0x05:
+                            # Embedded window commands
+                            current_formatting["embedded_image"] = f"window:{alignment}"
+                        else:
+                            # Bitmap commands
+                            current_formatting["embedded_image"] = f"bitmap:{alignment}"
+
+                        # Read compressed picture size with bounds checking
+                        try:
                             picture_size, linkdata1_ptr = self.scan_long(linkdata1, linkdata1_ptr)
+                        except (struct.error, IndexError):
+                            # Skip malformed picture size
+                            continue
 
-                            # Handle different picture types following C reference
-                            if x1 == 0x22:  # HC31 format
-                                if linkdata1_ptr + 2 <= len(linkdata1):
+                        # Handle different picture types following C reference
+                        if x1 == 0x22:  # HC31 format
+                            if linkdata1_ptr + 2 <= len(linkdata1):
+                                try:
                                     num_hotspots, linkdata1_ptr = self.scan_word(linkdata1, linkdata1_ptr)
                                     # Store hotspot count for later processing
                                     current_formatting["embedded_hotspots"] = num_hotspots
-                            elif x1 == 0x03:  # HC30 format
-                                # HC30 format handling
-                                pass
+                                except (struct.error, IndexError):
+                                    # Skip malformed hotspot count
+                                    pass
+                        elif x1 == 0x03:  # HC30 format
+                            # HC30 format handling
+                            pass
 
-                            # Extract bitmap reference if available
-                            if linkdata1_ptr + 2 <= len(linkdata1):
+                        # Extract bitmap reference if available
+                        if linkdata1_ptr + 2 <= len(linkdata1):
+                            try:
                                 bitmap_ref, linkdata1_ptr = self.scan_word(linkdata1, linkdata1_ptr)
                                 current_formatting["embedded_image"] += f":{bitmap_ref}"
+                            except (struct.error, IndexError):
+                                # Skip malformed bitmap reference
+                                pass
 
-                            # Skip remaining picture data
-                            remaining_picture_data = picture_size - (linkdata1_ptr - (linkdata1_ptr - picture_size - 4))
-                            if remaining_picture_data > 0:
-                                linkdata1_ptr += min(remaining_picture_data, len(linkdata1) - linkdata1_ptr)
+                        # Skip remaining picture data with bounds checking
+                        remaining_picture_data = picture_size - (linkdata1_ptr - (linkdata1_ptr - picture_size - 4))
+                        if remaining_picture_data > 0:
+                            skip_amount = min(remaining_picture_data, len(linkdata1) - linkdata1_ptr)
+                            if skip_amount > 0:
+                                linkdata1_ptr += skip_amount
                 elif command_byte in [0xE0, 0xE1, 0xE2, 0xE3, 0xE6, 0xE7]:  # Jump commands
                     if linkdata1_ptr + 4 <= len(linkdata1):
                         finish_current_span()
-                        topic_offset = struct.unpack_from("<L", linkdata1, linkdata1_ptr)[0]
-                        linkdata1_ptr += 4
+                        try:
+                            topic_offset = struct.unpack_from("<L", linkdata1, linkdata1_ptr)[0]
+                            linkdata1_ptr += 4
+                        except (struct.error, IndexError):
+                            # Skip malformed jump command
+                            linkdata1_ptr = min(linkdata1_ptr + 4, len(linkdata1))
+                            continue
 
                         # Set hyperlink formatting based on command type
                         is_popup = command_byte in [0xE0, 0xE2, 0xE6]
@@ -2031,21 +2091,35 @@ class TopicFile(InternalFile):
                 elif command_byte in [0xC8, 0xCC]:  # Macro commands
                     if linkdata1_ptr + 2 <= len(linkdata1):
                         finish_current_span()
-                        macro_length = struct.unpack_from("<h", linkdata1, linkdata1_ptr)[0]
-                        linkdata1_ptr += 2
+                        try:
+                            macro_length = struct.unpack_from("<h", linkdata1, linkdata1_ptr)[0]
+                            linkdata1_ptr += 2
 
-                        if linkdata1_ptr + macro_length <= len(linkdata1):
-                            # Extract macro string
-                            macro_string = linkdata1[linkdata1_ptr : linkdata1_ptr + macro_length].decode(
-                                "cp1252", errors="replace"
-                            )
-                            linkdata1_ptr += macro_length
+                            if linkdata1_ptr + macro_length <= len(linkdata1):
+                                # Extract macro string with bounds checking
+                                try:
+                                    macro_string = linkdata1[linkdata1_ptr : linkdata1_ptr + macro_length].decode(
+                                        "cp1252", errors="replace"
+                                    )
+                                    linkdata1_ptr += macro_length
 
-                            # Set hyperlink for macro
-                            current_formatting["hyperlink"] = True
-                            current_formatting["hyperlink_target"] = f"macro:{macro_string}"
-                            hotspot_active = True
-                            hotspot_start_position = total_text_position
+                                    # Set hyperlink for macro
+                                    current_formatting["hyperlink"] = True
+                                    current_formatting["hyperlink_target"] = f"macro:{macro_string}"
+                                    hotspot_active = True
+                                    hotspot_start_position = total_text_position
+                                except (UnicodeDecodeError, IndexError):
+                                    # Skip malformed macro string
+                                    linkdata1_ptr = min(linkdata1_ptr + macro_length, len(linkdata1))
+                                    continue
+                            else:
+                                # Incomplete macro data, skip what we can
+                                linkdata1_ptr = len(linkdata1)
+                                continue
+                        except (struct.error, IndexError):
+                            # Skip malformed macro length
+                            linkdata1_ptr = min(linkdata1_ptr + 2, len(linkdata1))
+                            continue
                 elif command_byte in [0xEA, 0xEB, 0xEE, 0xEF]:  # External jump commands
                     if linkdata1_ptr + 2 <= len(linkdata1):
                         finish_current_span()

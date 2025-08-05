@@ -23,6 +23,8 @@ from .internal_files.cfn import CFnFile
 from .internal_files.rose import RoseFile
 from .internal_files.bitmap import BitmapFile
 from .internal_files.tomap import ToMapFile
+from .internal_files.petra import PetraFile
+from .internal_files.grp import GRPFile
 from .exceptions import InvalidHLPFileError
 import struct
 
@@ -75,6 +77,8 @@ class HelpFile(BaseModel):
     ] = {}  # Maps 'A' -> {'btree': XWBTreeFile, 'data': XWDataFile, 'map': XWMapFile} for |xKWBTREE files
     config_files: Dict[int, CFnFile] = {}  # Maps config number -> CFnFile
     rose: Optional[RoseFile] = None
+    petra: Optional[PetraFile] = None
+    grp_files: Dict[str, GRPFile] = {}  # Maps filename -> GRPFile for .GRP files
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
@@ -199,6 +203,8 @@ class HelpFile(BaseModel):
         self.keyword_index_files = self._parse_keyword_index_files()
         self.config_files = self._parse_config_files()
         self.rose = self._parse_rose()
+        self.petra = self._parse_petra()
+        self.grp_files = self._parse_grp_files()
         self.bitmaps = self._parse_bitmaps()
 
     def _parse_header(self) -> HLPHeader:
@@ -329,6 +335,26 @@ class HelpFile(BaseModel):
 
         context_data = self.data[context_offset + 9 : context_offset + 9 + used_space]
         return ContextFile(filename="|CONTEXT", raw_data=context_data)
+
+    def _parse_petra(self) -> PetraFile:
+        """
+        Parses the |Petra internal file.
+
+        The |Petra file maps topic offsets to original RTF source filenames.
+        It's created when using HCRTF /a option.
+        """
+        if "|Petra" not in self.directory.files:
+            return None
+
+        petra_offset = self.directory.files["|Petra"]
+        # We need to read the file header to know the size of the |Petra file
+        file_header_data = self.data[petra_offset : petra_offset + 9]
+        if len(file_header_data) < 9:
+            return None
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+        petra_data = self.data[petra_offset + 9 : petra_offset + 9 + used_space]
+        return PetraFile(petra_data, help_file=self)
 
     def _parse_phrase(self) -> PhraseFile:
         """
@@ -1006,3 +1032,41 @@ class HelpFile(BaseModel):
         stats = self.rose.get_statistics()
         stats["has_rose_file"] = True
         return stats
+
+    def _parse_grp_files(self) -> Dict[str, GRPFile]:
+        """
+        Parse all GRP (MediaView Group) files in the directory.
+
+        GRP files end with .GRP extension and contain group+ footnotes
+        assigned to topics in MediaView files.
+        """
+        grp_files = {}
+
+        if not self.directory:
+            return grp_files
+
+        # Find all files ending with .GRP
+        for filename in self.directory.files:
+            if filename.upper().endswith(".GRP"):
+                try:
+                    file_offset = self.directory.files[filename]
+
+                    # Read file header to get size
+                    file_header_data = self.data[file_offset : file_offset + 9]
+                    if len(file_header_data) < 9:
+                        continue
+
+                    reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+
+                    # Extract GRP file data
+                    grp_data = self.data[file_offset + 9 : file_offset + 9 + used_space]
+
+                    # Create GRP file instance
+                    grp_file = GRPFile(grp_data, help_file=self)
+                    grp_files[filename] = grp_file
+
+                except (struct.error, IndexError, ValueError):
+                    # Skip malformed GRP files
+                    continue
+
+        return grp_files
