@@ -2,6 +2,7 @@
 
 from .base import InternalFile
 from ..btree import BTree
+from ..text_utils import decode_help_text
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 import struct
@@ -108,7 +109,7 @@ class TTLBTreeFile(InternalFile):
                     title_end = len(page)
 
                 title_bytes = page[title_start:title_end]
-                topic_title = self._decode_string(title_bytes)
+                topic_title = decode_help_text(title_bytes)
 
                 # Move past the null terminator (if found)
                 offset = title_end + (1 if title_end < len(page) else 0)
@@ -127,26 +128,6 @@ class TTLBTreeFile(InternalFile):
                 # Store in our maps for quick lookup
                 self.topic_title_map[topic_offset] = topic_title
                 self.title_topic_map[topic_title] = topic_offset
-
-    def _decode_string(self, data: bytes) -> str:
-        """
-        Decode string data using appropriate encoding.
-        Falls back through multiple encodings to handle international text.
-        """
-        if not data:
-            return ""
-
-        # Try common Windows encodings
-        encodings = ["cp1252", "cp1251", "utf-8", "latin-1"]
-
-        for encoding in encodings:
-            try:
-                return data.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-
-        # Final fallback: decode with errors='replace' to avoid crashes
-        return data.decode("cp1252", errors="replace")
 
     def get_topic_title_for_offset(self, topic_offset: int) -> Optional[str]:
         """

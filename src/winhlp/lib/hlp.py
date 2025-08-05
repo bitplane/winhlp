@@ -373,12 +373,11 @@ class HelpFile(BaseModel):
             return None
 
         petra_offset = self.directory.files["|Petra"]
-        # We need to read the file header to know the size of the |Petra file
         file_header_data = self.data[petra_offset : petra_offset + 9]
         if len(file_header_data) < 9:
             return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
+        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
         petra_data = self.data[petra_offset + 9 : petra_offset + 9 + used_space]
         return PetraFile(petra_data, help_file=self)
 
@@ -386,18 +385,7 @@ class HelpFile(BaseModel):
         """
         Parses the |Phrases internal file.
         """
-        if "|Phrases" not in self.directory.files:
-            return None
-
-        phrase_offset = self.directory.files["|Phrases"]
-        # We need to read the file header to know the size of the |Phrases file
-        file_header_data = self.data[phrase_offset : phrase_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        phrase_data = self.data[phrase_offset + 9 : phrase_offset + 9 + used_space]
-        return PhraseFile(filename="|Phrases", raw_data=phrase_data, system_file=self.system)
+        return self._load_internal_file("|Phrases", PhraseFile, system_file=self.system)
 
     def _parse_tomap(self) -> ToMapFile:
         """
@@ -415,9 +403,6 @@ class HelpFile(BaseModel):
         """
         Parses the |CATALOG internal file.
         """
-        if "|CATALOG" not in self.directory.files:
-            return None
-
         return self._load_internal_file("|CATALOG", CatalogFile)
 
     def _parse_viola(self) -> ViolaFile:
@@ -1135,48 +1120,15 @@ class HelpFile(BaseModel):
 
     def _parse_winpos(self) -> Optional[WinPosFile]:
         """Parse the |WinPos internal file (GID files only)."""
-        if "|WinPos" not in self.directory.files:
-            return None
-
-        winpos_offset = self.directory.files["|WinPos"]
-        file_header_data = self.data[winpos_offset : winpos_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-        winpos_data = self.data[winpos_offset + 9 : winpos_offset + 9 + used_space]
-
-        return WinPosFile(filename="|WinPos", raw_data=winpos_data)
+        return self._load_internal_file("|WinPos", WinPosFile)
 
     def _parse_pete(self) -> Optional[PeteFile]:
         """Parse the |Pete internal file (GID files only)."""
-        if "|Pete" not in self.directory.files:
-            return None
-
-        pete_offset = self.directory.files["|Pete"]
-        file_header_data = self.data[pete_offset : pete_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-        pete_data = self.data[pete_offset + 9 : pete_offset + 9 + used_space]
-
-        return PeteFile(filename="|Pete", raw_data=pete_data)
+        return self._load_internal_file("|Pete", PeteFile)
 
     def _parse_flags(self) -> Optional[FlagsFile]:
         """Parse the |Flags internal file (GID files only)."""
-        if "|Flags" not in self.directory.files:
-            return None
-
-        flags_offset = self.directory.files["|Flags"]
-        file_header_data = self.data[flags_offset : flags_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-        flags_data = self.data[flags_offset + 9 : flags_offset + 9 + used_space]
-
-        return FlagsFile(filename="|Flags", raw_data=flags_data)
+        return self._load_internal_file("|Flags", FlagsFile)
 
     def _parse_cntjump(self) -> Optional[CntJumpFile]:
         """Parse the |CntJump internal file (GID files only)."""

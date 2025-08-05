@@ -1,6 +1,7 @@
 """Parser for the |GMACROS internal file."""
 
 from .base import InternalFile
+from ..text_utils import decode_help_text
 from pydantic import BaseModel
 from typing import List
 import struct
@@ -87,7 +88,7 @@ class GMacrosFile(InternalFile):
                     null_pos = entry_bytes.find(b"\x00")
                     if null_pos != -1:
                         entry_bytes = entry_bytes[:null_pos]
-                    entry_macro = self._decode_text(entry_bytes)
+                    entry_macro = decode_help_text(entry_bytes)
 
             # Read exit macro (second string at string_offset, length = length - string_offset)
             exit_macro = ""
@@ -99,7 +100,7 @@ class GMacrosFile(InternalFile):
                     null_pos = exit_bytes.find(b"\x00")
                     if null_pos != -1:
                         exit_bytes = exit_bytes[:null_pos]
-                    exit_macro = self._decode_text(exit_bytes)
+                    exit_macro = decode_help_text(exit_bytes)
 
             # Create entry
             parsed_entry = {
@@ -117,23 +118,3 @@ class GMacrosFile(InternalFile):
 
             # Advance by full record length (C code: pos += len)
             offset = record_start + length
-
-    def _decode_text(self, data: bytes) -> str:
-        """
-        Decode text data using appropriate encoding.
-        Falls back through multiple encodings to handle international text.
-        """
-        if not data:
-            return ""
-
-        # Try common Windows encodings
-        fallback_encodings = ["cp1252", "cp1251", "cp850", "iso-8859-1"]
-
-        for encoding in fallback_encodings:
-            try:
-                return data.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-
-        # Final fallback: decode with errors='replace' to avoid crashes
-        return data.decode("cp1252", errors="replace")

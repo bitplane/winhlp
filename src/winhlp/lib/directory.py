@@ -113,22 +113,26 @@ class Directory(BaseModel):
         // SearchFile function shows the logic for traversing the B-Tree
         // to find a file.
         """
-        for page, n_entries in self.btree.iterate_leaf_pages():
-            offset = 8  # Skip page header
-            for _ in range(n_entries):
-                # Find null-terminated filename
-                end_of_string = page.find(b"\x00", offset)
-                if end_of_string == -1:
-                    break
 
-                filename = page[offset:end_of_string].decode("ascii", errors="ignore")
-                offset = end_of_string + 1
+        def parse_directory_entry(page_data, offset):
+            """Parse a single directory entry from page data."""
+            # Find null-terminated filename
+            end_of_string = page_data.find(b"\x00", offset)
+            if end_of_string == -1:
+                return None, offset
 
-                # Read file offset
-                if offset + 4 > len(page):
-                    break  # Not enough data for file offset
-                file_offset = struct.unpack_from("<l", page, offset)[0]
-                offset += 4
+            filename = page_data[offset:end_of_string].decode("ascii", errors="ignore")
+            offset = end_of_string + 1
 
-                # Store in directory
-                self.files[filename] = file_offset
+            # Read file offset
+            if offset + 4 > len(page_data):
+                return None, offset  # Not enough data for file offset
+
+            file_offset = struct.unpack_from("<l", page_data, offset)[0]
+            offset += 4
+
+            return (filename, file_offset), offset
+
+        # Use the new iterator pattern
+        for filename, file_offset in self.btree.iterate_leaf_entries_with_parser(parse_directory_entry):
+            self.files[filename] = file_offset

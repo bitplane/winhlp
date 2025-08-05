@@ -2,6 +2,7 @@
 
 from .base import InternalFile
 from ..btree import BTree
+from ..text_utils import decode_help_text
 from pydantic import BaseModel
 from typing import Optional, Dict, List
 import struct
@@ -110,7 +111,7 @@ class RoseFile(InternalFile):
                     break
 
                 macro_bytes = page[macro_start:macro_end]
-                macro = self._decode_string(macro_bytes)
+                macro = decode_help_text(macro_bytes)
 
                 # Move past the null terminator
                 offset = macro_end + 1
@@ -124,7 +125,7 @@ class RoseFile(InternalFile):
                     topic_title_end = len(page)
 
                 topic_title_bytes = page[topic_title_start:topic_title_end]
-                topic_title = self._decode_string(topic_title_bytes)
+                topic_title = decode_help_text(topic_title_bytes)
 
                 # Move past the null terminator (if found)
                 offset = topic_title_end + (1 if topic_title_end < len(page) else 0)
@@ -143,26 +144,6 @@ class RoseFile(InternalFile):
 
                 # Store in our map for quick lookup
                 self.macro_map[keyword_hash] = entry
-
-    def _decode_string(self, data: bytes) -> str:
-        """
-        Decode string data using appropriate encoding.
-        Falls back through multiple encodings to handle international text.
-        """
-        if not data:
-            return ""
-
-        # Try common Windows encodings
-        encodings = ["cp1252", "cp1251", "utf-8", "latin-1"]
-
-        for encoding in encodings:
-            try:
-                return data.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-
-        # Final fallback: decode with errors='replace' to avoid crashes
-        return data.decode("cp1252", errors="replace")
 
     def get_macro_by_hash(self, keyword_hash: int) -> Optional[RoseLeafEntry]:
         """

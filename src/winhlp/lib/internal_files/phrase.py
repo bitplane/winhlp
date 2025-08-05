@@ -1,6 +1,7 @@
 """Parser for the |Phrases internal file."""
 
 from .base import InternalFile
+from ..text_utils import decode_help_text_with_system
 from typing import List, Optional, Any
 from ..compression import decompress
 import struct
@@ -120,42 +121,10 @@ class PhraseFile(InternalFile):
             if start_offset >= 0 and end_offset <= len(phrase_data) and start_offset < end_offset:
                 phrase_bytes = phrase_data[start_offset:end_offset]
                 # Decode using appropriate encoding from system file
-                phrase = self._decode_text(phrase_bytes)
+                phrase = decode_help_text_with_system(phrase_bytes, self.system_file)
                 self.phrases.append(phrase)
             else:
                 self.phrases.append("")  # Invalid phrase
-
-    def _decode_text(self, data: bytes) -> str:
-        """
-        Decode text data using the appropriate encoding from the system file.
-        Falls back through multiple encodings to handle international text.
-        """
-        if not data:
-            return ""
-
-        # Get encoding from system file if available
-        encoding = "cp1252"  # Default Windows Western European
-        if self.system_file and self.system_file.encoding is not None:
-            encoding = self.system_file.encoding
-
-        # Try the determined encoding first
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            pass
-
-        # Fall back through common Windows encodings
-        fallback_encodings = ["cp1252", "cp1251", "cp850", "iso-8859-1"]
-
-        for fallback_encoding in fallback_encodings:
-            if fallback_encoding != encoding:  # Don't retry the same encoding
-                try:
-                    return data.decode(fallback_encoding)
-                except UnicodeDecodeError:
-                    continue
-
-        # Final fallback: decode with errors='replace' to avoid crashes
-        return data.decode("cp1252", errors="replace")
 
     def get_phrase(self, phrase_number: int) -> Optional[str]:
         """

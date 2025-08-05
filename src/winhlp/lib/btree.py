@@ -302,3 +302,38 @@ class BTree(BaseModel):
                 break
 
             yield self.pages[current_page_idx], n_entries
+
+    def iterate_leaf_entries_with_parser(self, parse_entry_func):
+        """
+        Iterates through all entries in B+ tree leaf pages with a custom parser function.
+
+        This method provides a higher-level iterator that abstracts away the page-by-page
+        iteration and header skipping, allowing callers to focus on their specific
+        entry parsing logic.
+
+        Based on the C reference's GetFirstPage/GetNextPage pattern but provides
+        a cleaner, more Pythonic interface.
+
+        Args:
+            parse_entry_func: Function that takes (page_data, offset) and returns
+                             (parsed_entry, new_offset). Should return (None, offset)
+                             to skip invalid entries.
+
+        Yields:
+            Parsed entries from parse_entry_func (excluding None results)
+        """
+        for page, n_entries in self.iterate_leaf_pages():
+            offset = 8  # Skip 8-byte page header (BTREENODEHEADER)
+
+            for _ in range(n_entries):
+                if offset >= len(page):
+                    break
+
+                try:
+                    entry, new_offset = parse_entry_func(page, offset)
+                    if entry is not None:
+                        yield entry
+                    offset = new_offset
+                except (struct.error, IndexError, ValueError):
+                    # Skip malformed entries
+                    break
