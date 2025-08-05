@@ -229,6 +229,8 @@ class BTree(BaseModel):
 
             page = self.pages[page_index]
             # Read index header
+            if len(page) < 6:
+                raise BTreeError(f"Invalid index page size: {len(page)} < 6 bytes")
             unknown, n_entries, prev_page = struct.unpack("<hhh", page[:6])
             page_index = prev_page
 
@@ -238,6 +240,8 @@ class BTree(BaseModel):
 
         page = self.pages[page_index]
         # Read leaf header
+        if len(page) < 8:
+            raise BTreeError(f"Invalid leaf page size: {len(page)} < 8 bytes")
         unknown, n_entries, prev_page, next_page = struct.unpack("<hhhh", page[:8])
 
         buffer.next_page = next_page
@@ -264,6 +268,8 @@ class BTree(BaseModel):
 
         page = self.pages[buffer.next_page]
         # Read leaf header
+        if len(page) < 8:
+            raise BTreeError(f"Invalid next page size: {len(page)} < 8 bytes")
         unknown, n_entries, prev_page, next_page = struct.unpack("<hhhh", page[:8])
 
         buffer.next_page = next_page

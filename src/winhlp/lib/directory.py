@@ -86,6 +86,8 @@ class Directory(BaseModel):
         e
         """
         raw_bytes = data[:9]
+        if len(raw_bytes) < 9:
+            raise ValueError(f"Invalid directory file header size: {len(raw_bytes)} < 9 bytes")
         reserved_space, used_space, file_flags = struct.unpack("<llB", raw_bytes)
         parsed_header = {
             "reserved_space": reserved_space,
@@ -123,6 +125,8 @@ class Directory(BaseModel):
                 offset = end_of_string + 1
 
                 # Read file offset
+                if offset + 4 > len(page):
+                    break  # Not enough data for file offset
                 file_offset = struct.unpack_from("<l", page, offset)[0]
                 offset += 4
 

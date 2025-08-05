@@ -142,6 +142,8 @@ class SystemFile(InternalFile):
         Parses the header of the |SYSTEM file.
         """
         raw_bytes = self.raw_data[:12]
+        if len(raw_bytes) < 12:
+            raise ValueError(f"Invalid system file header size: {len(raw_bytes)} < 12 bytes")
         magic, minor, major, gen_date, flags = struct.unpack("<HHHlH", raw_bytes)
         parsed_header = {
             "magic": magic,
@@ -176,7 +178,7 @@ class SystemFile(InternalFile):
         SYSTEMREC[]
         """
         offset = 12  # Start after the header
-        while offset < len(self.raw_data):
+        while offset + 4 <= len(self.raw_data):
             record_type, data_size = struct.unpack_from("<HH", self.raw_data, offset)
             offset += 4
             record_data = self.raw_data[offset : offset + data_size]
