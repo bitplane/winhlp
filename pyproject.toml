@@ -27,7 +27,8 @@ dev = [
     "build",
     "twine",
     "ruff",
-    "pillow"
+    "pillow",
+    "pydoc-markdown"
 ]
 
 [build-system]

@@ -3,6 +3,8 @@ __pycache__
 .coverage*
 htmlcov
 dist
+site
+docs/pydoc
 *.json
 
 # Downloaded HLP corpus archives (extracted into tests/data/corpus/)
