@@ -7,6 +7,10 @@ import struct
 from ..compression import decompress
 import warnings
 
+# Topic formatting command bytes we have already warned about, so an unknown
+# command in a large corpus produces one warning per byte value, not thousands.
+_WARNED_TOPIC_COMMANDS: set = set()
+
 
 def safe_unpack_from(format_str: str, data: bytes, offset: int, default_value=None):
     """Safely unpack struct data with bounds checking.
@@ -404,8 +408,15 @@ class TextSpan(BaseModel):
     is_italic: bool = False
     is_underline: bool = False
     is_strikethrough: bool = False
+    is_double_underline: bool = False
+    is_small_caps: bool = False
     is_superscript: bool = False
     is_subscript: bool = False
+    # Font metrics resolved from the |FONT descriptor referenced by font_number.
+    font_half_points: Optional[int] = None
+    facename: Optional[str] = None
+    fg_rgb: Optional[Tuple[int, int, int]] = None
+    bg_rgb: Optional[Tuple[int, int, int]] = None
     is_hyperlink: bool = False
     hyperlink_target: Optional[str] = None
     embedded_image: Optional[str] = None
@@ -472,9 +483,21 @@ class ParsedTopic(BaseModel):
     text_spans: List[TextSpan] = []
     tables: List[Table] = []
     hotspot_mappings: List[HotspotMapping] = []
+    # paragraph_info is the FIRST paragraph's formatting (kept for compatibility);
+    # paragraph_infos holds every display record's ParagraphInfo in order.
     paragraph_info: Optional[ParagraphInfo] = None
+    paragraph_infos: List[ParagraphInfo] = []
     browse_back: Optional[int] = None
     browse_forward: Optional[int] = None
+    # Derived cross-reference data (populated during/after parsing).
+    topic_offset: Optional[int] = None  # this topic's TOPICOFFSET
+    non_scroll_offset: Optional[int] = None  # start of scrolling region, or None
+    entry_macros: List[str] = []  # macros run on entry (! footnotes)
+    context_names: List[str] = []  # context ids resolving to this topic
+    keywords: List[str] = []  # K/A keywords attached to this topic
+    annotations: List[str] = []  # user annotation text (from a sibling .ANN file)
+    browse_prev_topic: Optional[int] = None  # resolved browse-sequence neighbours
+    browse_next_topic: Optional[int] = None
     raw_data: dict
 
     def get_plain_text(self) -> str:
@@ -698,13 +721,11 @@ class TopicFile(InternalFile):
     formatting_commands: List[Any] = []
     parsed_topics: List[ParsedTopic] = []
     topic_offset: int = 0  # Track TOPICOFFSET for hyperlink resolution
-    topic_offset_map: dict = {}  # Maps topic offsets to topic numbers
     remaining_linkdata1: bytes = b""  # LinkData1 remaining after ParagraphInfo parsing
 
     def __init__(self, system_file: Any = None, **data):
         super().__init__(**data)
         self.system_file = system_file
-        self.topic_offset_map = {}
         self._parse()
 
     @staticmethod
@@ -823,8 +844,14 @@ class TopicFile(InternalFile):
         topic_pos = 12
         self.topic_offset = 0
         offset = 0
+        block_index = 0
 
         while offset < len(self.raw_data):
+            # TOPICOFFSET = block_index * 0x8000 + (chars counted from the first
+            # TOPICLINK of this block). Reset the per-block character base here;
+            # display records advance self.topic_offset by their char count.
+            self.topic_offset = block_index * 0x8000
+
             raw_header_bytes = self.raw_data[offset : offset + 12]
             if len(raw_header_bytes) < 12:
                 break
@@ -877,6 +904,7 @@ class TopicFile(InternalFile):
 
             offset += topic_block_size
             topic_pos = offset + 12  # Next block's topic position
+            block_index += 1
 
     def _parse_links(self, block_data: bytes, before31: bool = False, topic_pos: int = 0):
         """
@@ -995,10 +1023,25 @@ class TopicFile(InternalFile):
         """
         if link.record_type == 0x02:  # TL_TOPICHDR
             topic_header = self._parse_topic_header(link_data1, before31)
-            # Start a new topic
-            self._start_new_topic(topic_header)
+            # LinkData2 of a topic header holds NUL-separated strings: the first
+            # is the topic title, the rest are entry (!) macros (helpdeco.c:3317).
+            title = None
+            entry_macros = []
+            if link_data2:
+                raw2 = self._parse_link_data2(link_data2, link.data_len2, link.block_size, link.data_len1)
+                strings = raw2.split(b"\x00")
+                if strings and strings[0]:
+                    title = self._decode_text(strings[0])
+                for s in strings[1:]:
+                    if s:
+                        entry_macros.append(self._decode_text(s))
+            self._start_new_topic(topic_header, title=title, entry_macros=entry_macros)
         elif link.record_type == 0x20:  # TL_DISPLAY
             paragraph_info = self._parse_paragraph_info(link_data1)
+            # A display record advances the running TOPICOFFSET by its character
+            # count (helpdeco.c:3359-3362 `x1 = scanword; TopicOffset += x1`).
+            if paragraph_info and paragraph_info.topic_length:
+                self.topic_offset += paragraph_info.topic_length
             link.text_content = self._decode_text(
                 self._parse_link_data2(link_data2, link.data_len2, link.block_size, link.data_len1)
             )
@@ -1026,39 +1069,12 @@ class TopicFile(InternalFile):
             if table:
                 self._add_table_to_current_topic(table)
         else:
-            # Unknown record type - fail loudly so we know what we're missing
-            import binascii
-
-            data1_preview = (
-                binascii.hexlify(link_data1[:64]).decode() if link_data1 and len(link_data1) > 0 else "empty"
-            )
-            data2_preview = (
-                binascii.hexlify(link_data2[:64]).decode() if link_data2 and len(link_data2) > 0 else "empty"
-            )
-
-            # Collect diagnostic information
-            diagnostics = [
-                f"Unknown record type: 0x{link.record_type:02X}",
-                f"Block info: block_size={link.block_size}, data_len1={link.data_len1}, data_len2={link.data_len2}",
-                f"NextBlock: {link.next_block}",
-                f"LinkData1 preview (first 64 bytes): {data1_preview}",
-                f"LinkData2 preview (first 64 bytes): {data2_preview}",
-                "",
-                "Known record types:",
-                "  0x01: TL_DISPLAY30 (Windows 3.0 displayable information)",
-                "  0x02: TL_TOPICHDR (topic header)",
-                "  0x20: TL_DISPLAY (Windows 3.1 displayable information)",
-                "  0x23: TL_TABLE (Windows 3.1 table)",
-                "",
-                "Possible causes:",
-                "  - New undocumented record type",
-                "  - Parser misalignment (reading data at wrong offset)",
-                "  - Corrupted help file",
-                "  - Different help file version with extended record types",
-            ]
-
-            # Fail loudly during development
-            raise NotImplementedError("\n".join(diagnostics))
+            # Unknown record type. _parse_links only dispatches 0x01/0x02/0x20/0x23
+            # so this is normally unreachable, but degrade gracefully rather than
+            # crash the whole file if a new/undocumented type ever reaches here.
+            if link.record_type not in _WARNED_TOPIC_COMMANDS:
+                _WARNED_TOPIC_COMMANDS.add(link.record_type)
+                warnings.warn(f"Skipping unknown TOPICLINK record type 0x{link.record_type:02X}")
 
     def _parse_topic_header(self, data: bytes, before31: bool = False):
         """
@@ -1161,604 +1177,6 @@ class TopicFile(InternalFile):
         # Fallback: no phrase compression - data is stored uncompressed
         return data[:data_len2]
 
-    def _parse_formatting_commands(self, data: bytes):
-        """
-        Parses the formatting commands that follow ParagraphInfo.
-        Note: This may be incorrectly parsing LinkData1 as sequential commands.
-        The C code suggests formatting commands should be interleaved with text.
-        """
-        # Guard against invalid data
-        if not data or len(data) == 0:
-            return
-
-        # DEBUG: Could log first few bytes here if needed for debugging
-        # hex_preview = data[:min(16, len(data))].hex()
-
-        offset = 0
-        while offset < len(data):
-            start_command_offset = offset
-            if offset + 1 > len(data) or offset < 0:
-                break
-            try:
-                command_byte = safe_unpack_single("<B", data, offset, 0)
-                offset += 1
-            except struct.error:
-                warnings.warn(f"Insufficient data for command byte at offset {offset}, stopping formatting parse")
-                break
-
-            # Basic formatting commands (from C reference code)
-            if command_byte == 0x20:  # vfld MVB
-                if offset + 4 > len(data):
-                    break
-                try:
-                    _vfld_number = safe_unpack_single("<l", data, offset)
-                    offset += 4
-                except struct.error:
-                    warnings.warn(f"Insufficient data for vfld command at offset {offset}")
-                    break
-                # Skip for now - MVB specific
-                continue
-            elif command_byte == 0x21:  # dtype MVB
-                if offset + 2 > len(data):
-                    break
-                try:
-                    _dtype_number = safe_unpack_single("<h", data, offset)
-                    offset += 2
-                except struct.error:
-                    warnings.warn(f"Insufficient data for dtype command at offset {offset}")
-                    break
-                # Skip for now - MVB specific
-                continue
-            elif command_byte == 0x80:  # Font change
-                if offset + 2 > len(data):
-                    break
-                try:
-                    font_number = safe_unpack_single("<h", data, offset)
-                    offset += 2
-                except struct.error:
-                    warnings.warn(f"Insufficient data for font change command at offset {offset}")
-                    break
-                # TODO: Handle font change
-                continue
-            elif command_byte == 0x81:  # Line break
-                # TODO: Handle line break
-                continue
-            elif command_byte == 0x82:  # End of paragraph
-                # TODO: Handle end of paragraph
-                continue
-            elif command_byte == 0x83:  # TAB
-                # TODO: Handle tab
-                continue
-            elif command_byte == 0x89:  # End of hotspot
-                # TODO: Handle end of hotspot
-                continue
-            elif command_byte == 0x8B:  # Non-break space
-                # TODO: Handle non-break space
-                continue
-            elif command_byte == 0x8C:  # Non-break hyphen
-                # TODO: Handle non-break hyphen
-                continue
-            elif command_byte == 0x02:  # JumpCommand
-                if offset + 4 > len(data):
-                    break
-                topic_offset = struct.unpack_from("<l", data, offset)[0]
-                offset += 4
-                # Resolve the topic offset to actual topic using TOPICOFFSET tracking
-                resolved_topic_number = self._resolve_topic_offset(topic_offset)
-                command = JumpCommand(
-                    topic_offset=topic_offset,
-                    resolved_topic_number=resolved_topic_number,
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {"topic_offset": topic_offset, "resolved_topic_number": resolved_topic_number},
-                    },
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x03:  # ExternalJumpCommand
-                if offset + 5 > len(data):  # Need at least 1 byte for jump_type + 4 bytes for topic_offset
-                    break
-                jump_type = struct.unpack_from("<B", data, offset)[0]
-                offset += 1
-                topic_offset = struct.unpack_from("<l", data, offset)[0]
-                offset += 4
-                window_number = None
-                external_file = None
-                window_name = None
-
-                if jump_type == 0x01:  # JUMP_TYPE_WINDOW
-                    if offset + 1 > len(data):
-                        break
-                    window_number = struct.unpack_from("<B", data, offset)[0]
-                    offset += 1
-                elif jump_type == 0x02:  # JUMP_TYPE_EXTERNAL
-                    # Read null-terminated string for external_file
-                    external_file_start = offset
-                    while offset < len(data) and data[offset] != 0x00:
-                        offset += 1
-                    if offset >= len(data):
-                        break
-                    external_file = self._decode_text(data[external_file_start:offset])
-                    offset += 1  # for null terminator
-
-                    # Read null-terminated string for window_name
-                    window_name_start = offset
-                    while offset < len(data) and data[offset] != 0x00:
-                        offset += 1
-                    if offset >= len(data):
-                        break
-                    window_name = self._decode_text(data[window_name_start:offset])
-                    offset += 1  # for null terminator
-
-                # Resolve the topic offset to actual topic using TOPICOFFSET tracking
-                resolved_topic_number = self._resolve_topic_offset(topic_offset)
-                command = ExternalJumpCommand(
-                    jump_type=jump_type,
-                    topic_offset=topic_offset,
-                    resolved_topic_number=resolved_topic_number,
-                    window_number=window_number,
-                    external_file=external_file,
-                    window_name=window_name,
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {
-                            "jump_type": jump_type,
-                            "topic_offset": topic_offset,
-                            "resolved_topic_number": resolved_topic_number,
-                            "window_number": window_number,
-                            "external_file": external_file,
-                            "window_name": window_name,
-                        },
-                    },
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x04:  # PictureCommand
-                if offset + 5 > len(data):  # Need 1 byte for picture_type + 4 bytes for picture_size
-                    break
-                picture_type = struct.unpack_from("<B", data, offset)[0]
-                offset += 1
-                picture_size = struct.unpack_from("<l", data, offset)[0]
-                offset += 4
-                if offset + picture_size > len(data):
-                    break
-                picture_data = data[offset : offset + picture_size]
-                offset += picture_size
-                command = PictureCommand(
-                    picture_type=picture_type,
-                    picture_size=picture_size,
-                    data=picture_data,
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {
-                            "picture_type": picture_type,
-                            "picture_size": picture_size,
-                            "data_len": len(picture_data),
-                        },
-                    },
-                )
-                self.formatting_commands.append(command)
-                # Picture data is parsed by PictureCommand when needed
-            elif command_byte == 0x05:  # MacroCommand
-                macro_string_start = offset
-                while offset < len(data) and data[offset] != 0x00:
-                    offset += 1
-                if offset >= len(data):
-                    break
-                macro_string = self._decode_text(data[macro_string_start:offset])
-                offset += 1  # for null terminator
-                command = MacroCommand(
-                    macro_string=macro_string,
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {"macro_string": macro_string}},
-                )
-                self.formatting_commands.append(command)
-            # 0x20-0x21 Commands (MVB specific commands)
-            elif command_byte == 0x20:  # VfldCommand - {vfld n}
-                if offset + 4 > len(data):
-                    break
-                value = struct.unpack_from("<l", data, offset)[0]
-                offset += 4
-                command = VfldCommand(
-                    value=value,
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {"value": value}},
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x21:  # DtypeCommand - {dtype n}
-                if offset + 2 > len(data):
-                    break
-                value = struct.unpack_from("<h", data, offset)[0]
-                offset += 2
-                command = DtypeCommand(
-                    value=value,
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {"value": value}},
-                )
-                self.formatting_commands.append(command)
-            # 0x80-0x8C Commands (Text formatting and special characters)
-            elif command_byte == 0x80:  # FontChangeCommand
-                if offset + 2 > len(data):
-                    break
-                font_number = struct.unpack_from("<H", data, offset)[0]
-                offset += 2
-                command = FontChangeCommand(
-                    font_number=font_number,
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {"font_number": font_number}},
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x81:  # LineBreakCommand
-                command = LineBreakCommand(
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {}},
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x82:  # ParagraphBreakCommand
-                command = ParagraphBreakCommand(
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {}},
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x83:  # TabCommand
-                command = TabCommand(
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {}},
-                )
-                self.formatting_commands.append(command)
-            elif command_byte in [0x86, 0x87, 0x88]:  # BitmapCommand (center/left/right)
-                if offset + 1 > len(data):
-                    break
-                bitmap_type = struct.unpack_from("<B", data, offset)[0]
-                offset += 1
-
-                # Use compressed integer parsing like helldeco.c
-                bitmap_size, offset = self.scan_long(data, offset)
-
-                # Handle different bitmap types based on helldeco.c logic
-                hotspot_count = None
-                if bitmap_type == 0x22:  # HC31
-                    if offset + 2 > len(data):
-                        break
-                    hotspot_count, offset = self.scan_word(data, offset)
-                elif bitmap_type == 0x03:  # HC30
-                    pass  # No additional data
-
-                # Read bitmap data
-                if offset + bitmap_size > len(data):
-                    break
-                bitmap_data = data[offset : offset + bitmap_size]
-                offset += bitmap_size
-
-                command = BitmapCommand(
-                    alignment=command_byte,
-                    bitmap_type=bitmap_type,
-                    bitmap_size=bitmap_size,
-                    bitmap_data=bitmap_data,
-                    hotspot_count=hotspot_count,
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {
-                            "alignment": command_byte,
-                            "bitmap_type": bitmap_type,
-                            "bitmap_size": bitmap_size,
-                            "hotspot_count": hotspot_count,
-                        },
-                    },
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x89:  # HotspotEndCommand
-                command = HotspotEndCommand(
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {}},
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x8B:  # NonBreakSpaceCommand
-                command = NonBreakSpaceCommand(
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {}},
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x8C:  # NonBreakHyphenCommand
-                command = NonBreakHyphenCommand(
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {}},
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0xC8:  # MacroHotspotCommand
-                if offset + 2 > len(data):
-                    break
-                macro_length = struct.unpack_from("<H", data, offset)[0]
-                offset += 2
-                if offset + macro_length > len(data):
-                    break
-                macro_string = self._decode_text(data[offset : offset + macro_length])
-                offset += macro_length
-                command = MacroHotspotCommand(
-                    macro_string=macro_string,
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {"macro_string": macro_string}},
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0xCC:  # MacroNoFontCommand
-                if offset + 2 > len(data):
-                    break
-                macro_length = struct.unpack_from("<H", data, offset)[0]
-                offset += 2
-                if offset + macro_length > len(data):
-                    break
-                macro_string = self._decode_text(data[offset : offset + macro_length])
-                offset += macro_length
-                command = MacroNoFontCommand(
-                    macro_string=macro_string,
-                    raw_data={"raw": data[start_command_offset:offset], "parsed": {"macro_string": macro_string}},
-                )
-                self.formatting_commands.append(command)
-
-            # 0xE0-0xEF Commands (Hyperlinks and external jumps)
-            elif command_byte == 0xE0:  # PopupJumpHC30Command
-                if offset + 4 > len(data):
-                    break
-                topic_number = struct.unpack_from("<L", data, offset)[0]
-                offset += 4
-                resolved_topic_number = self._resolve_topic_offset(topic_number)
-                command = PopupJumpHC30Command(
-                    topic_number=topic_number,
-                    resolved_topic_number=resolved_topic_number,
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {"topic_number": topic_number, "resolved_topic_number": resolved_topic_number},
-                    },
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0xE1:  # TopicJumpHC30Command
-                if offset + 4 > len(data):
-                    break
-                topic_number = struct.unpack_from("<L", data, offset)[0]
-                offset += 4
-                resolved_topic_number = self._resolve_topic_offset(topic_number)
-                command = TopicJumpHC30Command(
-                    topic_number=topic_number,
-                    resolved_topic_number=resolved_topic_number,
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {"topic_number": topic_number, "resolved_topic_number": resolved_topic_number},
-                    },
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0xE2:  # PopupJumpHC31Command
-                if offset + 4 > len(data):
-                    break
-                context_hash = struct.unpack_from("<L", data, offset)[0]
-                offset += 4
-                # Resolve context hash to context name using CONTEXT file
-                context_name = self._resolve_context_hash(context_hash)
-                resolved_topic_number = self._resolve_topic_offset(context_hash)
-                command = PopupJumpHC31Command(
-                    context_hash=context_hash,
-                    context_name=context_name,
-                    resolved_topic_number=resolved_topic_number,
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {
-                            "context_hash": context_hash,
-                            "context_name": context_name,
-                            "resolved_topic_number": resolved_topic_number,
-                        },
-                    },
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0xE3:  # TopicJumpHC31Command
-                if offset + 4 > len(data):
-                    break
-                context_hash = struct.unpack_from("<L", data, offset)[0]
-                offset += 4
-                context_name = self._resolve_context_hash(context_hash)
-                resolved_topic_number = self._resolve_topic_offset(context_hash)
-                command = TopicJumpHC31Command(
-                    context_hash=context_hash,
-                    context_name=context_name,
-                    resolved_topic_number=resolved_topic_number,
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {
-                            "context_hash": context_hash,
-                            "context_name": context_name,
-                            "resolved_topic_number": resolved_topic_number,
-                        },
-                    },
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0xE6:  # PopupJumpNoFontCommand
-                if offset + 4 > len(data):
-                    break
-                context_hash = struct.unpack_from("<L", data, offset)[0]
-                offset += 4
-                context_name = self._resolve_context_hash(context_hash)
-                resolved_topic_number = self._resolve_topic_offset(context_hash)
-                command = PopupJumpNoFontCommand(
-                    context_hash=context_hash,
-                    context_name=context_name,
-                    resolved_topic_number=resolved_topic_number,
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {
-                            "context_hash": context_hash,
-                            "context_name": context_name,
-                            "resolved_topic_number": resolved_topic_number,
-                        },
-                    },
-                )
-                self.formatting_commands.append(command)
-            elif command_byte == 0xE7:  # TopicJumpNoFontCommand
-                if offset + 4 > len(data):
-                    break
-                context_hash = struct.unpack_from("<L", data, offset)[0]
-                offset += 4
-                context_name = self._resolve_context_hash(context_hash)
-                resolved_topic_number = self._resolve_topic_offset(context_hash)
-                command = TopicJumpNoFontCommand(
-                    context_hash=context_hash,
-                    context_name=context_name,
-                    resolved_topic_number=resolved_topic_number,
-                    raw_data={
-                        "raw": data[start_command_offset:offset],
-                        "parsed": {
-                            "context_hash": context_hash,
-                            "context_name": context_name,
-                            "resolved_topic_number": resolved_topic_number,
-                        },
-                    },
-                )
-                self.formatting_commands.append(command)
-            elif command_byte in [0xEA, 0xEB, 0xEE, 0xEF]:  # External jump commands
-                if offset + 2 > len(data):
-                    break
-                data_length = struct.unpack_from("<H", data, offset)[0]
-                offset += 2
-                if offset + data_length > len(data):
-                    break
-
-                data_start = offset
-
-                # Parse the structure according to helpfile.md:
-                # unsigned char Type (0, 1, 4 or 6)
-                # TOPICOFFSET TopicOffset
-                # unsigned char WindowNumber (only if Type = 1)
-                # STRINGZ NameOfExternalFile (only if Type = 4 or 6)
-                # STRINGZ WindowName (only if Type = 6)
-
-                if offset >= len(data):
-                    break
-                type_field = struct.unpack_from("<B", data, offset)[0]
-                offset += 1
-
-                if offset + 4 > len(data):
-                    break
-                topic_offset = struct.unpack_from("<l", data, offset)[0]
-                offset += 4
-
-                window_number = None
-                external_file = ""
-                window_name = ""
-
-                if type_field == 1:
-                    # WindowNumber present
-                    if offset >= len(data):
-                        break
-                    window_number = struct.unpack_from("<B", data, offset)[0]
-                    offset += 1
-                elif type_field in [4, 6]:
-                    # NameOfExternalFile present
-                    external_file_start = offset
-                    while offset < data_start + data_length and data[offset] != 0x00:
-                        offset += 1
-                    if offset < data_start + data_length:
-                        external_file = self._decode_text(data[external_file_start:offset])
-                        offset += 1  # skip null terminator
-
-                    if type_field == 6:
-                        # WindowName also present
-                        window_name_start = offset
-                        while offset < data_start + data_length and data[offset] != 0x00:
-                            offset += 1
-                        if offset < data_start + data_length:
-                            window_name = self._decode_text(data[window_name_start:offset])
-                            offset += 1  # skip null terminator
-
-                offset = data_start + data_length  # Move to end of command data
-
-                if command_byte in [0xEA, 0xEE]:  # Popup commands
-                    command = ExternalPopupJumpCommand(
-                        type_field=type_field,
-                        topic_offset=topic_offset,
-                        window_number=window_number,
-                        external_file=external_file,
-                        window_name=window_name,
-                        no_font_change=(command_byte == 0xEE),
-                        raw_data={
-                            "raw": data[start_command_offset:offset],
-                            "parsed": {
-                                "type_field": type_field,
-                                "topic_offset": topic_offset,
-                                "window_number": window_number,
-                                "external_file": external_file,
-                                "window_name": window_name,
-                                "no_font_change": (command_byte == 0xEE),
-                            },
-                        },
-                    )
-                else:  # Topic jump commands (0xEB, 0xEF)
-                    command = ExternalTopicJumpCommand(
-                        type_field=type_field,
-                        topic_offset=topic_offset,
-                        window_number=window_number,
-                        external_file=external_file,
-                        window_name=window_name,
-                        no_font_change=(command_byte == 0xEF),
-                        raw_data={
-                            "raw": data[start_command_offset:offset],
-                            "parsed": {
-                                "type_field": type_field,
-                                "topic_offset": topic_offset,
-                                "window_number": window_number,
-                                "external_file": external_file,
-                                "window_name": window_name,
-                                "no_font_change": (command_byte == 0xEF),
-                            },
-                        },
-                    )
-                self.formatting_commands.append(command)
-            elif command_byte == 0x00:  # End of commands
-                break
-            elif command_byte == 0xFF:  # End of character formatting
-                break
-            elif command_byte in [0x86, 0x87, 0x88]:  # Embedded/bitmap commands
-                if offset + 2 > len(data):
-                    break
-                _ = struct.unpack_from("<B", data, offset)[0]  # embed_type - unused in old parser
-                offset += 1
-                # Skip complex parsing - implemented in interleaved parser instead
-                continue
-            elif command_byte in [0xC8, 0xCC]:  # Macro commands
-                if offset + 2 > len(data):
-                    break
-                macro_length = struct.unpack_from("<h", data, offset)[0]
-                offset += 2
-                if offset + macro_length > len(data):
-                    break
-                # Skip macro data
-                offset += macro_length
-                continue
-            elif command_byte in [0xE0, 0xE1, 0xE2, 0xE3, 0xE6, 0xE7]:  # Jump commands HC30/HC31
-                if offset + 4 > len(data):
-                    break
-                topic_offset = struct.unpack_from("<l", data, offset)[0]
-                offset += 4
-                # TODO: Handle jump commands
-                continue
-            elif command_byte in [0xEA, 0xEB, 0xEE, 0xEF]:  # External jump commands
-                # These are already handled above in the existing code
-                pass
-            else:
-                # Unknown formatting command - provide detailed diagnostics
-                context_data = data[max(0, start_command_offset - 16) : start_command_offset + 16]
-                context_hex = context_data.hex()
-
-                diagnostics = [
-                    f"Unknown formatting command: 0x{command_byte:02X} at offset {start_command_offset}",
-                    f"Context (32 bytes around command): {context_hex}",
-                    f"Command position marked with > <: {context_hex[:32]}>0x{command_byte:02X}<{context_hex[34:]}",
-                    "",
-                    "Known formatting commands:",
-                    "  0x00: End of commands",
-                    "  0x20: vfld (variable field)",
-                    "  0x21: dtype (data type - MediaView)",
-                    "  0x80: Font change",
-                    "  0x81: Line break",
-                    "  0x82: Paragraph break",
-                    "  0x83: Tab",
-                    "  0x86, 0x87, 0x88: Embedded/bitmap commands",
-                    "  0xC8, 0xCC: Macro commands",
-                    "  0xE2-0xE3, 0xE6-0xE7: Internal jumps",
-                    "  0xEA-0xEB, 0xEE-0xEF: External jumps",
-                    "  0xFF: End of character formatting",
-                    "",
-                    "This may indicate:",
-                    "  - Newer help file format with extended commands",
-                    "  - Parser misalignment",
-                    "  - Corrupted formatting data",
-                ]
-
-                raise NotImplementedError("\n".join(diagnostics))
-
     def _parse_paragraph_info(self, data: bytes):
         """
         Parses the ParagraphInfo structure using compressed integers.
@@ -1766,13 +1184,21 @@ class TopicFile(InternalFile):
         offset = 0
         start_offset = offset
 
-        # First value is always uncompressed long
-        topic_size = struct.unpack_from("<l", data, offset)[0]
+        # TopicSize is a COMPRESSED long and TopicLength a compressed word
+        # (helpdeco.c: `scanlong(&ptr); x1 = scanword(&ptr);`). Reading TopicSize
+        # as a raw 4-byte long over-consumes and desyncs the whole command stream.
+        topic_size, offset = self.scan_long(data, offset)
+        topic_length, offset = self.scan_word(data, offset)
+
+        # Four raw bytes precede the attribute bits (helpdeco.c `ptr += 4`):
+        #   unsigned char unknownUnsignedChar
+        #   char          unknownBiasedChar
+        #   unsigned short id
         offset += 4
 
-        # The rest use compressed integers based on the C code
-        topic_length, offset = self.scan_word(data, offset)
-        bits_raw, offset = self.scan_word(data, offset)
+        # The paragraph attribute bits are a RAW uint16, not a compressed word.
+        bits_raw = struct.unpack_from("<H", data, offset)[0] if offset + 2 <= len(data) else 0
+        offset += 2
 
         bits = ParagraphInfoBits(
             unknown_follows=bool(bits_raw & 0x0001),
@@ -1824,7 +1250,10 @@ class TopicFile(InternalFile):
             if offset < len(data):
                 border_info_raw = data[offset]
                 offset += 1
-                border_width, offset = self.scan_int(data, offset)
+                # BorderWidth is a raw signed short (helpdeco.c: `ptr += 2`), not
+                # a compressed short.
+                border_width = struct.unpack_from("<h", data, offset)[0] if offset + 2 <= len(data) else 0
+                offset += 2
                 border_info = BorderInfo(
                     border_box=bool(border_info_raw & 0x0001),
                     border_top=bool(border_info_raw & 0x0002),
@@ -1839,7 +1268,11 @@ class TopicFile(InternalFile):
 
         if bits.tabinfo_follows:
             if offset < len(data):
-                number_of_tab_stops, offset = self.scan_word(data, offset)
+                # NumberOfTabStops is a compressed *signed* short (helpdeco.c uses
+                # scanint here). Reading it as an unsigned word inflates the count
+                # (e.g. byte 0x82 -> 65 instead of 1), so the tab loop devours the
+                # following character-formatting commands and no text is emitted.
+                number_of_tab_stops, offset = self.scan_int(data, offset)
                 tabs = []
                 for _ in range(number_of_tab_stops):
                     if offset >= len(data):
@@ -1877,33 +1310,37 @@ class TopicFile(InternalFile):
         # Store the remaining LinkData1 after ParagraphInfo for interleaved parsing
         self.remaining_linkdata1 = data[offset:] if offset < len(data) else b""
 
+        return paragraph_info
+
     def _parse_topic_content_interleaved(
         self, linkdata1: bytes, linkdata2: bytes, data_len2: int, block_size: int, data_len1: int
     ) -> tuple[List[TextSpan], List[HotspotMapping]]:
         """
-        Parse topic content by properly interleaving LinkData1 (formatting commands)
-        and LinkData2 (text strings) according to the Windows Help file format.
+        Parse topic content by interleaving LinkData1 (formatting commands) with
+        LinkData2 (phrase-decompressed text), following helpdeco.c's TopicDump loop
+        (doc/ref/helpdeco.c lines ~3459-3797):
 
-        Based on helldeco.c implementation and documentation:
-        1. Read null-terminated string from LinkData2 (with phrase decompression)
-        2. Read formatting command from LinkData1
-        3. Apply formatting to next string
-        4. Repeat until 0xFF (end of formatting) or end of data
+            do { output *str } while (*str++);   # emit one NUL-terminated segment
+            switch (*ptr) { ...advance ptr per command... }
+
+        The loop runs until a 0xFF command (end of character formatting) or until
+        the command stream is exhausted. Unknown command bytes advance the pointer
+        by one (helpdeco's `default: ptr++`) rather than aborting, so a single
+        unrecognized byte can no longer swallow the rest of a record.
         """
-        text_spans = []
-        hotspot_mappings = []
+        text_spans: List[TextSpan] = []
+        hotspot_mappings: List[HotspotMapping] = []
 
-        # Get decompressed LinkData2
         raw_linkdata2 = self._parse_link_data2(linkdata2, data_len2, block_size, data_len1)
 
-        # Initialize pointers for both data streams
-        linkdata1_ptr = 0
-        linkdata2_ptr = 0
+        n1 = len(linkdata1)
+        n2 = len(raw_linkdata2)
+        p1 = 0  # pointer into linkdata1 (formatting commands)
+        p2 = 0  # pointer into raw_linkdata2 (text)
 
-        # Current text accumulation and formatting state
-        current_text_bytes = bytearray()
-        current_font = None
-        current_formatting = {
+        current_text = bytearray()
+        current_font: Optional[int] = None
+        fmt = {
             "bold": False,
             "italic": False,
             "underline": False,
@@ -1914,379 +1351,261 @@ class TopicFile(InternalFile):
             "hyperlink_target": None,
             "embedded_image": None,
         }
-
-        # Hotspot tracking
         hotspot_active = False
         hotspot_start_position = 0
         total_text_position = 0
-        current_external_jump = None  # Track external jump details for hotspot creation
+        current_external_jump = None
 
-        def finish_current_span():
-            """Helper to finish current text span and create new one."""
-            nonlocal \
-                current_text_bytes, \
-                total_text_position, \
-                hotspot_active, \
-                hotspot_start_position, \
-                current_external_jump
-            if current_text_bytes:
-                current_text = self._decode_text(bytes(current_text_bytes))
-                span_index = len(text_spans)
+        def flush_span():
+            """Emit the accumulated text as a TextSpan (and a hotspot mapping)."""
+            nonlocal total_text_position, hotspot_active, current_external_jump
+            if not current_text:
+                return
+            text = self._decode_text(bytes(current_text))
+            span_index = len(text_spans)
 
-                # Create hotspot mapping if in hotspot
-                if hotspot_active:
-                    if current_external_jump:
-                        # Handle external jump hotspot
-                        hotspot_type = "external_popup" if current_external_jump["is_popup"] else "external_jump"
+            if hotspot_active and current_external_jump:
+                is_popup = current_external_jump["is_popup"]
+                target_parts = [f"topic_offset:{current_external_jump['topic_offset']}"]
+                if current_external_jump["external_file"]:
+                    target_parts.append(f"file:{current_external_jump['external_file']}")
+                if current_external_jump["window_name"]:
+                    target_parts.append(f"window:{current_external_jump['window_name']}")
+                if current_external_jump["window_number"] is not None:
+                    target_parts.append(f"window_number:{current_external_jump['window_number']}")
+                hotspot_mappings.append(
+                    HotspotMapping(
+                        text_span_index=span_index,
+                        hotspot_type="external_popup" if is_popup else "external_jump",
+                        target="|".join(target_parts),
+                        display_text=text,
+                        start_position=hotspot_start_position,
+                        end_position=total_text_position + len(text),
+                        raw_data={"type": "external_jump", **current_external_jump},
+                    )
+                )
+                current_external_jump = None
+            elif hotspot_active and fmt["hyperlink"] and fmt["hyperlink_target"]:
+                target = fmt["hyperlink_target"]
+                hotspot_type = "jump"
+                if target.startswith("popup:"):
+                    hotspot_type = "popup"
+                elif target.startswith("macro:"):
+                    hotspot_type = "macro"
+                hotspot_mappings.append(
+                    HotspotMapping(
+                        text_span_index=span_index,
+                        hotspot_type=hotspot_type,
+                        target=target,
+                        display_text=text,
+                        start_position=hotspot_start_position,
+                        end_position=total_text_position + len(text),
+                        raw_data={"type": "hotspot", "target": target, "hotspot_type": hotspot_type},
+                    )
+                )
 
-                        # Build target string with external jump info
-                        target_parts = [f"topic_offset:{current_external_jump['topic_offset']}"]
-                        if current_external_jump["external_file"]:
-                            target_parts.append(f"file:{current_external_jump['external_file']}")
-                        if current_external_jump["window_name"]:
-                            target_parts.append(f"window:{current_external_jump['window_name']}")
-                        if current_external_jump["window_number"] is not None:
-                            target_parts.append(f"window_number:{current_external_jump['window_number']}")
-
-                        target = "|".join(target_parts)
-
-                        hotspot_mapping = HotspotMapping(
-                            text_span_index=span_index,
-                            hotspot_type=hotspot_type,
-                            target=target,
-                            display_text=current_text,
-                            start_position=hotspot_start_position,
-                            end_position=total_text_position + len(current_text),
-                            raw_data={
-                                "type": "external_jump",
-                                "command_byte": current_external_jump["command_byte"],
-                                "type_field": current_external_jump["type_field"],
-                                "topic_offset": current_external_jump["topic_offset"],
-                                "external_file": current_external_jump["external_file"],
-                                "window_name": current_external_jump["window_name"],
-                                "window_number": current_external_jump["window_number"],
-                                "is_popup": current_external_jump["is_popup"],
-                            },
-                        )
-                        hotspot_mappings.append(hotspot_mapping)
-                        current_external_jump = None  # Clear after use
-
-                    elif current_formatting["hyperlink"] and current_formatting["hyperlink_target"]:
-                        # Handle regular internal jump hotspot
-                        hotspot_type = "jump"
-                        target = current_formatting["hyperlink_target"]
-
-                        if target.startswith("popup:"):
-                            hotspot_type = "popup"
-                        elif target.startswith("macro:"):
-                            hotspot_type = "macro"
-
-                        hotspot_mapping = HotspotMapping(
-                            text_span_index=span_index,
-                            hotspot_type=hotspot_type,
-                            target=target,
-                            display_text=current_text,
-                            start_position=hotspot_start_position,
-                            end_position=total_text_position + len(current_text),
-                            raw_data={"type": "hotspot", "target": target, "hotspot_type": hotspot_type},
-                        )
-                        hotspot_mappings.append(hotspot_mapping)
-
-                # Create text span
-                text_span = TextSpan(
-                    text=current_text,
+            # Character emphasis (bold/italic/...) is a property of the |FONT
+            # descriptor referenced by the active font, not of the command stream.
+            attrs = self._font_attributes(current_font)
+            text_spans.append(
+                TextSpan(
+                    text=text,
                     font_number=current_font,
-                    is_bold=current_formatting["bold"],
-                    is_italic=current_formatting["italic"],
-                    is_underline=current_formatting["underline"],
-                    is_strikethrough=current_formatting["strikethrough"],
-                    is_superscript=current_formatting["superscript"],
-                    is_subscript=current_formatting["subscript"],
-                    is_hyperlink=current_formatting["hyperlink"],
-                    hyperlink_target=current_formatting["hyperlink_target"],
-                    embedded_image=current_formatting["embedded_image"],
+                    is_bold=attrs.get("bold", fmt["bold"]),
+                    is_italic=attrs.get("italic", fmt["italic"]),
+                    is_underline=attrs.get("underline", fmt["underline"]),
+                    is_strikethrough=attrs.get("strikethrough", fmt["strikethrough"]),
+                    is_double_underline=attrs.get("double_underline", False),
+                    is_small_caps=attrs.get("small_caps", False),
+                    is_superscript=fmt["superscript"],
+                    is_subscript=fmt["subscript"],
+                    font_half_points=attrs.get("half_points"),
+                    facename=attrs.get("facename"),
+                    fg_rgb=attrs.get("fg_rgb"),
+                    bg_rgb=attrs.get("bg_rgb"),
+                    is_hyperlink=fmt["hyperlink"],
+                    hyperlink_target=fmt["hyperlink_target"],
+                    embedded_image=fmt["embedded_image"],
                     raw_data={"type": "text", "span_index": span_index},
                 )
-                text_spans.append(text_span)
-                total_text_position += len(current_text)
-                current_text_bytes.clear()
+            )
+            total_text_position += len(text)
+            current_text.clear()
 
-        # Main interleaved parsing loop - matches C code algorithm
-        # Process strings and formatting commands in the proper sequence
-        while linkdata2_ptr < len(raw_linkdata2) and linkdata1_ptr < len(linkdata1):
-            # 1. Read complete null-terminated string from LinkData2
-            string_start = linkdata2_ptr
-            # Safe string reading with bounds checking
-            while linkdata2_ptr < len(raw_linkdata2) and raw_linkdata2[linkdata2_ptr] != 0x00:
-                linkdata2_ptr += 1
-
-            # Process the string (add to current text accumulation)
-            if string_start < linkdata2_ptr and linkdata2_ptr <= len(raw_linkdata2):
-                try:
-                    current_text_bytes.extend(raw_linkdata2[string_start:linkdata2_ptr])
-                except IndexError:
-                    # If we get an IndexError, something is wrong with our bounds - skip this string
+        def read_text_segment():
+            """Accumulate one NUL-terminated text segment (C: do{}while(*str++))."""
+            nonlocal p2
+            while p2 < n2:
+                c = raw_linkdata2[p2]
+                p2 += 1
+                if c == 0:
                     break
+                current_text.append(c)
 
-            # Skip null terminator with bounds check
-            if linkdata2_ptr < len(raw_linkdata2):
-                linkdata2_ptr += 1
+        # Guard against pathological/corrupt streams that fail to reach a 0xFF.
+        max_iterations = n1 + n2 + 16
+        iterations = 0
 
-            # 2. After processing string, read formatting command from LinkData1
-            if linkdata1_ptr < len(linkdata1):
-                try:
-                    command_byte = linkdata1[linkdata1_ptr]
-                    linkdata1_ptr += 1
-                except IndexError:
-                    # Bounds error reading command byte - exit parsing
-                    break
+        while iterations < max_iterations:
+            iterations += 1
 
-                if command_byte == 0xFF:  # End of character formatting
-                    break
-                elif command_byte == 0x00:  # End of commands
-                    break
-                elif command_byte == 0x80:  # Font change
-                    if linkdata1_ptr + 1 < len(linkdata1):
-                        finish_current_span()
-                        try:
-                            current_font = struct.unpack_from("<h", linkdata1, linkdata1_ptr)[0]
-                            linkdata1_ptr += 2
-                        except (struct.error, IndexError):
-                            # Skip malformed font change command
-                            linkdata1_ptr = min(linkdata1_ptr + 2, len(linkdata1))
-                elif command_byte == 0x81:  # Line break
-                    finish_current_span()
-                    current_text_bytes.extend(b"\n")
-                elif command_byte == 0x82:  # End of paragraph
-                    finish_current_span()
-                    current_text_bytes.extend(b"\n\n")
-                elif command_byte == 0x83:  # TAB
-                    finish_current_span()
-                    current_text_bytes.extend(b"\t")
-                elif command_byte == 0x89:  # End of hotspot
-                    finish_current_span()
-                    current_formatting["hyperlink"] = False
-                    current_formatting["hyperlink_target"] = None
-                    hotspot_active = False
-                elif command_byte == 0x8B:  # Non-break space
-                    finish_current_span()
-                    current_text_bytes.extend(b" ")
-                elif command_byte == 0x8C:  # Non-break hyphen
-                    finish_current_span()
-                    current_text_bytes.extend(b"-")
-                elif command_byte in [0x86, 0x87, 0x88]:  # Embedded/bitmap positioning commands
-                    if linkdata1_ptr < len(linkdata1):
-                        finish_current_span()
-                        try:
-                            _x3 = linkdata1[
-                                linkdata1_ptr
-                            ]  # First byte after command - unused in current implementation
-                            linkdata1_ptr += 1
+            # 1. Emit the next text segment before processing its formatting command.
+            read_text_segment()
 
-                            if linkdata1_ptr < len(linkdata1):
-                                x1 = linkdata1[linkdata1_ptr]  # Second byte after command
-                                linkdata1_ptr += 1
+            # 2. Read the following formatting command from LinkData1.
+            if p1 >= n1:
+                break
+            command = linkdata1[p1]
 
-                                # Determine command type based on C reference code
-                                alignment = {0x86: "center", 0x87: "left", 0x88: "right"}[command_byte]
-                            else:
-                                # Incomplete command, skip
-                                continue
-                        except IndexError:
-                            # Skip malformed embedded command
-                            linkdata1_ptr = min(linkdata1_ptr + 1, len(linkdata1))
-                            continue
+            if command == 0xFF:  # end of character formatting
+                p1 += 1
+                break
+            elif command == 0x80:  # font change
+                flush_span()
+                if p1 + 3 <= n1:
+                    current_font = struct.unpack_from("<h", linkdata1, p1 + 1)[0]
+                p1 += 3
+            elif command == 0x81:  # line break
+                current_text.extend(b"\n")
+                p1 += 1
+            elif command == 0x82:  # end of paragraph
+                current_text.extend(b"\n\n")
+                p1 += 1
+            elif command == 0x83:  # tab
+                current_text.extend(b"\t")
+                p1 += 1
+            elif command == 0x8B:  # non-break space
+                current_text.extend(b" ")
+                p1 += 1
+            elif command == 0x8C:  # non-break hyphen
+                current_text.extend(b"-")
+                p1 += 1
+            elif command == 0x20:  # vfld (MVB), long argument
+                p1 += 5
+            elif command == 0x21:  # dtype (MVB), short argument
+                p1 += 3
+            elif command in (0x86, 0x87, 0x88):  # embedded picture/window
+                flush_span()
+                alignment = {0x86: "inline", 0x87: "left", 0x88: "right"}[command]
+                x1 = linkdata1[p1 + 1] if p1 + 2 <= n1 else 0
+                p1 += 2
+                picture_size, p1 = self.scan_long(linkdata1, p1)
+                if x1 == 0x22:  # HC31: number of hotspots precedes the union
+                    _num_hotspots, p1 = self.scan_word(linkdata1, p1)
+                fmt["embedded_image"] = f"{'window' if x1 == 0x05 else 'bitmap'}:{alignment}"
+                if x1 in (0x03, 0x22) and p1 + 4 <= n1:
+                    picture_is_embedded = struct.unpack_from("<H", linkdata1, p1)[0]
+                    if picture_is_embedded == 0:
+                        picture_number = struct.unpack_from("<H", linkdata1, p1 + 2)[0]
+                        fmt["embedded_image"] += f":{picture_number}"
+                elif x1 == 0x05 and p1 + 6 < n1:
+                    # Embedded window (ewc/ewl/ewr): union is 3 shorts then a
+                    # STRINGZ "DLLName,WindowClass,Param" (helpdeco.c:3634). For
+                    # MediaView pictures Param names the resource (e.g. a bitmap).
+                    end = linkdata1.find(b"\x00", p1 + 6)
+                    if end == -1:
+                        end = min(p1 + 6 + 255, n1)
+                    embedded = self._decode_text(linkdata1[p1 + 6 : end])
+                    if embedded:
+                        fmt["embedded_image"] += f":{embedded}"
+                p1 += max(0, picture_size)  # skip the picture union
+            elif command == 0x89:  # end of hotspot
+                flush_span()
+                fmt["hyperlink"] = False
+                fmt["hyperlink_target"] = None
+                fmt["embedded_image"] = None
+                hotspot_active = False
+                p1 += 1
+            elif command in (0xC8, 0xCC):  # macro hotspot
+                flush_span()
+                if p1 + 3 <= n1:
+                    macro_length = struct.unpack_from("<h", linkdata1, p1 + 1)[0]
+                    macro = self._decode_text(linkdata1[p1 + 3 : p1 + 3 + max(0, macro_length)])
+                    fmt["hyperlink"] = True
+                    fmt["hyperlink_target"] = f"macro:{macro}"
+                    hotspot_active = True
+                    hotspot_start_position = total_text_position
+                    p1 += macro_length + 3
+                else:
+                    p1 = n1
+            elif command in (0xE0, 0xE1, 0xE2, 0xE3, 0xE6, 0xE7):  # jumps / popups
+                flush_span()
+                target = struct.unpack_from("<l", linkdata1, p1 + 1)[0] if p1 + 5 <= n1 else 0
+                is_popup = command in (0xE0, 0xE2, 0xE6)
+                kind = "popup" if is_popup else "topic"
+                if command in (0xE0, 0xE1):  # HC30: argument is a topic number
+                    fmt["hyperlink_target"] = f"{kind}:TOPIC{target}"
+                else:  # HC31: argument is a topic offset
+                    fmt["hyperlink_target"] = f"{kind}:{target & 0xFFFFFFFF:08X}"
+                fmt["hyperlink"] = True
+                hotspot_active = True
+                hotspot_start_position = total_text_position
+                p1 += 5
+            elif command in (0xEA, 0xEB, 0xEE, 0xEF):  # jump into external file / window
+                flush_span()
+                data_length = struct.unpack_from("<h", linkdata1, p1 + 1)[0] if p1 + 3 <= n1 else 0
+                data_start = p1 + 3
+                data_end = min(data_start + max(0, data_length), n1)
+                type_field = linkdata1[data_start] if data_start < n1 else 0
+                topic_offset = struct.unpack_from("<l", linkdata1, data_start + 1)[0] if data_start + 5 <= n1 else 0
+                window_number = None
+                external_file = ""
+                window_name = ""
+                q = data_start + 5
+                if type_field == 1:
+                    if q < data_end:
+                        window_number = linkdata1[q]
+                elif type_field in (4, 6):
+                    start = q
+                    while q < data_end and linkdata1[q] != 0x00:
+                        q += 1
+                    external_file = self._decode_text(linkdata1[start:q])
+                    q += 1
+                    if type_field == 6:
+                        start = q
+                        while q < data_end and linkdata1[q] != 0x00:
+                            q += 1
+                        window_name = self._decode_text(linkdata1[start:q])
+                is_popup = command in (0xEA, 0xEE)
+                fmt["hyperlink"] = True
+                hotspot_active = True
+                hotspot_start_position = total_text_position
+                current_external_jump = {
+                    "command_byte": command,
+                    "type_field": type_field,
+                    "topic_offset": topic_offset,
+                    "external_file": external_file or None,
+                    "window_name": window_name or None,
+                    "window_number": window_number,
+                    "is_popup": is_popup,
+                }
+                p1 = data_end
+            else:
+                # Unknown command byte: advance by one, matching helpdeco's
+                # `default: ptr++;`. Warn once per byte value so gaps are visible.
+                if command not in _WARNED_TOPIC_COMMANDS:
+                    _WARNED_TOPIC_COMMANDS.add(command)
+                    warnings.warn(f"Unknown topic formatting command 0x{command:02X}; skipping one byte")
+                p1 += 1
 
-                        # Process embedded command if we got here successfully
-                        if x1 == 0x05:
-                            # Embedded window commands
-                            current_formatting["embedded_image"] = f"window:{alignment}"
-                        else:
-                            # Bitmap commands
-                            current_formatting["embedded_image"] = f"bitmap:{alignment}"
-
-                        # Read compressed picture size with bounds checking
-                        try:
-                            picture_size, linkdata1_ptr = self.scan_long(linkdata1, linkdata1_ptr)
-                        except (struct.error, IndexError):
-                            # Skip malformed picture size
-                            continue
-
-                        # Handle different picture types following C reference
-                        if x1 == 0x22:  # HC31 format
-                            if linkdata1_ptr + 2 <= len(linkdata1):
-                                try:
-                                    num_hotspots, linkdata1_ptr = self.scan_word(linkdata1, linkdata1_ptr)
-                                    # Store hotspot count for later processing
-                                    current_formatting["embedded_hotspots"] = num_hotspots
-                                except (struct.error, IndexError):
-                                    # Skip malformed hotspot count
-                                    pass
-                        elif x1 == 0x03:  # HC30 format
-                            # HC30 format handling
-                            pass
-
-                        # Extract bitmap reference if available
-                        if linkdata1_ptr + 2 <= len(linkdata1):
-                            try:
-                                bitmap_ref, linkdata1_ptr = self.scan_word(linkdata1, linkdata1_ptr)
-                                current_formatting["embedded_image"] += f":{bitmap_ref}"
-                            except (struct.error, IndexError):
-                                # Skip malformed bitmap reference
-                                pass
-
-                        # Skip remaining picture data with bounds checking
-                        remaining_picture_data = picture_size - (linkdata1_ptr - (linkdata1_ptr - picture_size - 4))
-                        if remaining_picture_data > 0:
-                            skip_amount = min(remaining_picture_data, len(linkdata1) - linkdata1_ptr)
-                            if skip_amount > 0:
-                                linkdata1_ptr += skip_amount
-                elif command_byte in [0xE0, 0xE1, 0xE2, 0xE3, 0xE6, 0xE7]:  # Jump commands
-                    if linkdata1_ptr + 4 <= len(linkdata1):
-                        finish_current_span()
-                        try:
-                            topic_offset = struct.unpack_from("<L", linkdata1, linkdata1_ptr)[0]
-                            linkdata1_ptr += 4
-                        except (struct.error, IndexError):
-                            # Skip malformed jump command
-                            linkdata1_ptr = min(linkdata1_ptr + 4, len(linkdata1))
-                            continue
-
-                        # Set hyperlink formatting based on command type
-                        is_popup = command_byte in [0xE0, 0xE2, 0xE6]
-                        _no_font_change = command_byte in [0xE6, 0xE7]
-
-                        # TODO: Implement no_font_change behavior - preserve current font instead of changing
-
-                        current_formatting["hyperlink"] = True
-                        if is_popup:
-                            current_formatting["hyperlink_target"] = f"popup:{topic_offset:08X}"
-                        else:
-                            current_formatting["hyperlink_target"] = f"topic:{topic_offset:08X}"
-
-                        # Track hotspot state
-                        hotspot_active = True
-                        hotspot_start_position = total_text_position
-                elif command_byte in [0xC8, 0xCC]:  # Macro commands
-                    if linkdata1_ptr + 2 <= len(linkdata1):
-                        finish_current_span()
-                        try:
-                            macro_length = struct.unpack_from("<h", linkdata1, linkdata1_ptr)[0]
-                            linkdata1_ptr += 2
-
-                            if linkdata1_ptr + macro_length <= len(linkdata1):
-                                # Extract macro string with bounds checking
-                                try:
-                                    macro_string = linkdata1[linkdata1_ptr : linkdata1_ptr + macro_length].decode(
-                                        "cp1252", errors="replace"
-                                    )
-                                    linkdata1_ptr += macro_length
-
-                                    # Set hyperlink for macro
-                                    current_formatting["hyperlink"] = True
-                                    current_formatting["hyperlink_target"] = f"macro:{macro_string}"
-                                    hotspot_active = True
-                                    hotspot_start_position = total_text_position
-                                except (UnicodeDecodeError, IndexError):
-                                    # Skip malformed macro string
-                                    linkdata1_ptr = min(linkdata1_ptr + macro_length, len(linkdata1))
-                                    continue
-                            else:
-                                # Incomplete macro data, skip what we can
-                                linkdata1_ptr = len(linkdata1)
-                                continue
-                        except (struct.error, IndexError):
-                            # Skip malformed macro length
-                            linkdata1_ptr = min(linkdata1_ptr + 2, len(linkdata1))
-                            continue
-                elif command_byte in [0xEA, 0xEB, 0xEE, 0xEF]:  # External jump commands
-                    if linkdata1_ptr + 2 <= len(linkdata1):
-                        finish_current_span()
-                        data_length = struct.unpack_from("<h", linkdata1, linkdata1_ptr)[0]
-                        linkdata1_ptr += 2
-
-                        if linkdata1_ptr + data_length <= len(linkdata1):
-                            data_start = linkdata1_ptr
-
-                            # Parse external jump structure (same as old sequential parser)
-                            if linkdata1_ptr < len(linkdata1):
-                                type_field = struct.unpack_from("<B", linkdata1, linkdata1_ptr)[0]
-                                linkdata1_ptr += 1
-
-                                if linkdata1_ptr + 4 <= len(linkdata1):
-                                    topic_offset = struct.unpack_from("<l", linkdata1, linkdata1_ptr)[0]
-                                    linkdata1_ptr += 4
-
-                                    window_number = None
-                                    external_file = ""
-                                    window_name = ""
-
-                                    if type_field == 1:
-                                        # WindowNumber present
-                                        if linkdata1_ptr < len(linkdata1):
-                                            window_number = struct.unpack_from("<B", linkdata1, linkdata1_ptr)[0]
-                                            linkdata1_ptr += 1
-                                    elif type_field in [4, 6]:
-                                        # NameOfExternalFile present
-                                        external_file_start = linkdata1_ptr
-                                        while (
-                                            linkdata1_ptr < data_start + data_length
-                                            and linkdata1[linkdata1_ptr] != 0x00
-                                        ):
-                                            linkdata1_ptr += 1
-                                        if linkdata1_ptr < data_start + data_length:
-                                            external_file = self._decode_text(
-                                                linkdata1[external_file_start:linkdata1_ptr]
-                                            )
-                                            linkdata1_ptr += 1  # skip null terminator
-
-                                        if type_field == 6:
-                                            # WindowName also present
-                                            window_name_start = linkdata1_ptr
-                                            while (
-                                                linkdata1_ptr < data_start + data_length
-                                                and linkdata1[linkdata1_ptr] != 0x00
-                                            ):
-                                                linkdata1_ptr += 1
-                                            if linkdata1_ptr < data_start + data_length:
-                                                window_name = self._decode_text(
-                                                    linkdata1[window_name_start:linkdata1_ptr]
-                                                )
-                                                linkdata1_ptr += 1  # skip null terminator
-
-                                    linkdata1_ptr = data_start + data_length  # Move to end of command data
-
-                                    # Set hyperlink formatting and create hotspot mapping
-                                    is_popup = command_byte in [0xEA, 0xEE]
-                                    _no_font_change = command_byte in [0xEE, 0xEF]
-
-                                    current_formatting["hyperlink"] = True
-                                    current_formatting["popup"] = is_popup
-                                    current_formatting["external_file"] = external_file if external_file else None
-                                    current_formatting["window_name"] = window_name if window_name else None
-
-                                    # Store hotspot info for later processing
-                                    hotspot_active = True
-                                    hotspot_start_position = total_text_position
-
-                                    # Store external jump details for hotspot mapping
-                                    current_external_jump = {
-                                        "command_byte": command_byte,
-                                        "type_field": type_field,
-                                        "topic_offset": topic_offset,
-                                        "window_number": window_number,
-                                        "external_file": external_file,
-                                        "window_name": window_name,
-                                        "is_popup": is_popup,
-                                    }
-                        else:
-                            linkdata1_ptr += data_length
-                # For unknown commands, skip to avoid errors
-
-        # Finish any remaining text
-        finish_current_span()
+        # Emit any text left in the buffer once the command stream ends.
+        flush_span()
 
         return text_spans, hotspot_mappings
+
+    def _font_attributes(self, font_index: Optional[int]) -> dict:
+        """Look up character attributes for a font index via the |FONT file.
+
+        The |FONT file is parsed before |TOPIC, so it is reachable through the
+        parent HelpFile. Returns {} when unavailable so parsing degrades cleanly.
+        """
+        if font_index is None:
+            return {}
+        parent = getattr(self.system_file, "parent_hlp", None) if self.system_file else None
+        font_file = getattr(parent, "font", None) if parent else None
+        if font_file is None:
+            return {}
+        return font_file.get_font_attributes(font_index)
 
     def _decode_text(self, data: bytes) -> str:
         """
@@ -2320,12 +1639,21 @@ class TopicFile(InternalFile):
         # Final fallback: decode with errors='replace' to avoid crashes
         return data.decode("cp1252", errors="replace")
 
-    def _start_new_topic(self, topic_header):
+    def _start_new_topic(self, topic_header, title=None, entry_macros=None):
         """Start parsing a new topic."""
+        # non_scroll is TopicHeader.scroll (start of scrolling region); text
+        # before it is the non-scrolling region (helpdeco.c:3286-3293).
+        non_scroll = getattr(topic_header, "scroll", None)
+        if non_scroll in (-1, 0xFFFFFFFF):
+            non_scroll = getattr(topic_header, "next_topic", None)
         topic = ParsedTopic(
             topic_number=getattr(topic_header, "topic_num", None),
+            title=title,
+            entry_macros=entry_macros or [],
             browse_back=getattr(topic_header, "browse_bck", None),
             browse_forward=getattr(topic_header, "browse_for", None),
+            topic_offset=self.topic_offset,
+            non_scroll_offset=non_scroll,
             text_spans=[],
             raw_data={"header": topic_header},
         )
@@ -2346,8 +1674,10 @@ class TopicFile(InternalFile):
         current_topic.text_spans.extend(text_spans)
         if hotspot_mappings:
             current_topic.hotspot_mappings.extend(hotspot_mappings)
-        if paragraph_info and not current_topic.paragraph_info:
-            current_topic.paragraph_info = paragraph_info
+        if paragraph_info:
+            current_topic.paragraph_infos.append(paragraph_info)
+            if not current_topic.paragraph_info:
+                current_topic.paragraph_info = paragraph_info
 
     def _parse_paragraph_info_30(self, data: bytes) -> Optional[ParagraphInfo]:
         """Parse paragraph info for Windows 3.0 format."""
@@ -2524,7 +1854,7 @@ class TopicFile(InternalFile):
             # Bitmap positioning commands (0x86-0x88)
             elif byte_value in [0x86, 0x87, 0x88]:  # Embedded/bitmap positioning commands
                 finish_current_span()
-                alignment = {0x86: "center", 0x87: "left", 0x88: "right"}[byte_value]
+                alignment = {0x86: "inline", 0x87: "left", 0x88: "right"}[byte_value]
 
                 if i + 1 < len(raw_content):
                     x1 = raw_content[i + 1]
@@ -2765,113 +2095,72 @@ class TopicFile(InternalFile):
 
         return table
 
-    def _parse_table_cells_from_text(
-        self, table_text: str, expected_cols: int, column_widths: List[int]
-    ) -> List[TableRow]:
-        """Parse table cell content following helldeco.c cell parsing logic.
+    def _parse_table_cells_from_text(self, table_text, expected_cols: int, column_widths: List[int]) -> List[TableRow]:
+        """Parse table cell content following helldeco.c's TL_TABLE cell logic.
 
-        In helldeco.c, tables use 0x82 paragraph breaks with special handling:
-        - if ((unsigned char)ptr[1] != 0xFF) -> paragraph within cell
-        - if (*(int16_t*)(ptr + 2) == -1) -> end of row
-        - if (*(int16_t*)(ptr + 2) == lastcol) -> same column continued
-        - else -> move to next cell
+        table_text is the raw (phrase-decompressed) LinkData2 bytes. Cells are
+        delimited by 0x82 records whose following int16 column indicator selects
+        end-of-row (-1), same-column continuation (== lastcol), or next cell.
+        (helldeco.c case 0x82 for TL_TABLE.)
         """
-        rows = []
-        current_row_cells = []
-        current_cell_text = ""
+        data = table_text if isinstance(table_text, (bytes, bytearray)) else bytes(table_text, "latin-1", "replace")
+
+        rows: List[TableRow] = []
+        current_row_cells: List[TableCell] = []
+        cell_bytes = bytearray()
         last_col = -1
 
+        def flush_cell():
+            nonlocal cell_bytes
+            if bytes(cell_bytes).strip():
+                text = self._decode_text(bytes(cell_bytes))
+                current_row_cells.append(
+                    TableCell(
+                        text_spans=self._parse_text_content_for_cell(text),
+                        alignment="left",
+                        raw_data={"text": text},
+                    )
+                )
+            cell_bytes = bytearray()
+
+        def flush_row():
+            if current_row_cells:
+                rows.append(TableRow(cells=list(current_row_cells), raw_data={"cell_count": len(current_row_cells)}))
+                current_row_cells.clear()
+
         i = 0
-        while i < len(table_text):
-            byte_value = ord(table_text[i])
-
-            if byte_value == 0x82:  # Paragraph break - table cell delimiter
-                if i + 2 < len(table_text):
-                    # Check the pattern from helldeco.c case 0x82 for TL_TABLE
-                    next_byte = ord(table_text[i + 1])
-                    if next_byte != 0xFF and i + 4 < len(table_text):
-                        # Get the column indicator from helldeco.c logic
-                        col_indicator = struct.unpack("<h", table_text[i + 2 : i + 4].encode("latin-1"))[0]
-
-                        if col_indicator == -1:
-                            # End of row (\\cell\\intbl\\row)
-                            if current_cell_text.strip():
-                                cell_spans = self._parse_text_content_for_cell(current_cell_text)
-                                cell = TableCell(
-                                    text_spans=cell_spans, alignment="left", raw_data={"text": current_cell_text}
-                                )
-                                current_row_cells.append(cell)
-                                current_cell_text = ""
-
-                            if current_row_cells:
-                                row = TableRow(cells=current_row_cells, raw_data={"cell_count": len(current_row_cells)})
-                                rows.append(row)
-                                current_row_cells = []
+        n = len(data)
+        while i < n:
+            b = data[i]
+            if b == 0x82:  # paragraph break / cell delimiter
+                if i + 2 < n:
+                    next_byte = data[i + 1]
+                    if next_byte != 0xFF and i + 4 <= n:
+                        col_indicator = struct.unpack_from("<h", data, i + 2)[0]
+                        if col_indicator == -1:  # end of row
+                            flush_cell()
+                            flush_row()
                             last_col = -1
-                            i += 4
-                            continue
-
-                        elif col_indicator == last_col:
-                            # Same column continued (\\par\\pard)
-                            current_cell_text += "\n"
-                            i += 4
-                            continue
-
-                        else:
-                            # Move to next cell (\\cell\\pard)
-                            if current_cell_text.strip():
-                                cell_spans = self._parse_text_content_for_cell(current_cell_text)
-                                cell = TableCell(
-                                    text_spans=cell_spans, alignment="left", raw_data={"text": current_cell_text}
-                                )
-                                current_row_cells.append(cell)
-                                current_cell_text = ""
+                        elif col_indicator == last_col:  # same column continued
+                            cell_bytes += b"\n"
+                        else:  # move to next cell
+                            flush_cell()
                             last_col = col_indicator
-                            i += 4
-                            continue
-                    else:
-                        # Regular paragraph break within cell (\\par\\intbl)
-                        current_cell_text += "\n"
+                        i += 4
+                        continue
+                    else:  # regular paragraph break within a cell
+                        cell_bytes += b"\n"
                         i += 1
                         continue
                 else:
                     i += 1
                     continue
-
-            # Regular text content
-            elif byte_value >= 32 or table_text[i] in ["\n", "\r", "\t"]:
-                current_cell_text += table_text[i]
-            elif byte_value in [0x0C, 0x0D, 0x0A]:  # Traditional cell/row separators
-                # Handle basic cell separators as fallback
-                if byte_value == 0x0C:  # Cell separator
-                    if current_cell_text.strip():
-                        cell_spans = self._parse_text_content_for_cell(current_cell_text)
-                        cell = TableCell(text_spans=cell_spans, alignment="left", raw_data={"text": current_cell_text})
-                        current_row_cells.append(cell)
-                        current_cell_text = ""
-                elif byte_value in [0x0D, 0x0A]:  # Row separator
-                    if current_cell_text.strip():
-                        cell_spans = self._parse_text_content_for_cell(current_cell_text)
-                        cell = TableCell(text_spans=cell_spans, alignment="left", raw_data={"text": current_cell_text})
-                        current_row_cells.append(cell)
-                        current_cell_text = ""
-                    if current_row_cells:
-                        row = TableRow(cells=current_row_cells, raw_data={"cell_count": len(current_row_cells)})
-                        rows.append(row)
-                        current_row_cells = []
-
+            elif b >= 32 or b in (0x0A, 0x0D, 0x09):  # printable or whitespace
+                cell_bytes.append(b)
             i += 1
 
-        # Handle any remaining content
-        if current_cell_text.strip():
-            cell_spans = self._parse_text_content_for_cell(current_cell_text)
-            cell = TableCell(text_spans=cell_spans, alignment="left", raw_data={"text": current_cell_text})
-            current_row_cells.append(cell)
-
-        if current_row_cells:
-            row = TableRow(cells=current_row_cells, raw_data={"cell_count": len(current_row_cells)})
-            rows.append(row)
-
+        flush_cell()
+        flush_row()
         return rows
 
     def _parse_text_content_for_cell(self, cell_text: str) -> List[TextSpan]:
@@ -2911,160 +2200,3 @@ class TopicFile(InternalFile):
             if topic_text:
                 all_text.append(topic_text)
         return "\n\n".join(all_text)
-
-    def _resolve_topic_offset(self, topic_offset: int) -> Optional[int]:
-        """
-        Resolve a topic offset to an actual topic number.
-
-        This implements the complete topic resolution logic from helldeco.c:
-        1. For Win 3.0: Use |TOMAP file to map topic numbers to positions
-        2. For Win 3.1+: Use |CONTEXT file to resolve hash values, then map offsets
-        3. Fall back to TOPICOFFSET calculation and topic_offset_map
-
-        From helldeco.h:
-        TOPICOFFSET/0x8000 = block number,
-        TOPICOFFSET%0x8000 = number of characters and hotspots counting from first TOPICLINK of this block
-        """
-        if not self.topic_offset_map:
-            self._build_topic_offset_map()
-
-        # Determine Windows version for proper resolution strategy
-        before31 = self.system_file and self.system_file.header.minor < 16
-
-        if self.system_file and self.system_file.parent_hlp is not None:
-            hlp_file = self.system_file.parent_hlp
-
-            if before31:
-                # Windows 3.0: Use |TOMAP file for direct topic number lookup
-                if hlp_file.tomap is not None:
-                    # topic_offset is actually a topic number for Win 3.0
-                    topic_position = hlp_file.tomap.get_topic_position(topic_offset)
-                    if topic_position is not None:
-                        # Return the topic number directly
-                        return topic_offset
-
-                # Fall back to topic_offset_map for Win 3.0
-                if topic_offset in self.topic_offset_map:
-                    return self.topic_offset_map[topic_offset]
-            else:
-                # Windows 3.1+: Use |CONTEXT file to resolve hash-based lookups
-                if "|CONTEXT" in hlp_file.directory.files and hlp_file.context is not None:
-                    context_file = hlp_file.context
-                    if topic_offset in context_file.context_map:
-                        # This is a hash value, get the actual topic offset
-                        actual_offset = context_file.context_map[topic_offset]
-                        # Now resolve the actual offset using our topic_offset_map
-                        if actual_offset in self.topic_offset_map:
-                            return self.topic_offset_map[actual_offset]
-                        # Continue with TOPICOFFSET calculation using actual_offset
-                        topic_offset = actual_offset
-
-        # Try exact match in our built topic_offset_map first
-        if topic_offset in self.topic_offset_map:
-            return self.topic_offset_map[topic_offset]
-
-        # Calculate block number and position within block (TOPICOFFSET format)
-        block_number = topic_offset // 0x8000
-        position_in_block = topic_offset % 0x8000
-
-        # Find the topic that starts in or before this block/position
-        best_match = None
-        best_offset_diff = float("inf")
-
-        for stored_offset, topic_num in self.topic_offset_map.items():
-            stored_block = stored_offset // 0x8000
-            stored_position = stored_offset % 0x8000
-
-            # Check if this topic could contain the requested offset
-            if stored_block == block_number and stored_position <= position_in_block:
-                offset_diff = position_in_block - stored_position
-                if offset_diff < best_offset_diff:
-                    best_offset_diff = offset_diff
-                    best_match = topic_num
-            elif stored_block < block_number:
-                # Topic in earlier block could still be the right one
-                if best_match is None:
-                    best_match = topic_num
-
-        return best_match
-
-    def _build_topic_offset_map(self):
-        """
-        Build a mapping of topic offsets to topic numbers.
-
-        This works with the existing topic parsing infrastructure rather than
-        trying to reimplement the complex TopicRead logic from scratch.
-        """
-        self.topic_offset_map = {}
-
-        # If no parsed topics yet, there's nothing to map
-        if not self.parsed_topics:
-            return
-
-        # Determine Windows version for topic numbering
-        before31 = self.system_file and self.system_file.header.minor < 16
-
-        # Create a simple mapping based on parsed topics
-        # In Win 3.0, topic numbers start at 16; in Win 3.1+, they start at 0
-        topic_number_start = 16 if before31 else 0
-
-        for i, topic in enumerate(self.parsed_topics):
-            topic_number = topic_number_start + i
-
-            # Create a topic offset based on topic position
-            # This is a simplified approach - the real C implementation
-            # tracks actual TOPICOFFSET values during parsing
-            topic_offset = i * 0x8000  # Use block-based offsets
-
-            self.topic_offset_map[topic_offset] = topic_number
-
-            # Also add some common offset variations for better resolution
-            # This helps with hyperlink resolution that might use slight variations
-            if i > 0:
-                # Add offset for beginning of this topic's block
-                self.topic_offset_map[topic_offset + 0x100] = topic_number
-                self.topic_offset_map[topic_offset + 0x200] = topic_number
-
-    def _next_topic_offset(
-        self, current_topic_offset: int, next_block: int, topic_pos: int, decompress_size: int
-    ) -> int:
-        """
-        Implements the NextTopicOffset function from helldeco.c.
-
-        Advances TopicOffset to next block in |TOPIC if setting of TopicPos to
-        NextBlock crosses TOPICBLOCKHEADER.
-        """
-        # From helldeco.c:
-        # if ((NextBlock - sizeof(TOPICBLOCKHEADER)) / DecompressSize != (TopicPos - sizeof(TOPICBLOCKHEADER)) / DecompressSize)
-        # return ((NextBlock - sizeof(TOPICBLOCKHEADER)) / DecompressSize) * 0x8000L;
-
-        TOPICBLOCKHEADER_SIZE = 12
-
-        next_block_adjusted = (next_block - TOPICBLOCKHEADER_SIZE) // decompress_size
-        topic_pos_adjusted = (topic_pos - TOPICBLOCKHEADER_SIZE) // decompress_size
-
-        if next_block_adjusted != topic_pos_adjusted:
-            return next_block_adjusted * 0x8000
-
-        return current_topic_offset
-
-    def _resolve_context_hash(self, context_hash: int) -> Optional[str]:
-        """
-        Resolve a context hash to a context name using the CONTEXT file.
-
-        This uses the reverse_hash function from helldeco.c to generate
-        a context name that produces the given hash value.
-        """
-        # Try to use the CONTEXT file if available
-        if self.system_file and self.system_file.parent_hlp is not None:
-            hlp_file = self.system_file.parent_hlp
-            if "|CONTEXT" in hlp_file.directory.files and hlp_file.context is not None:
-                context_file = hlp_file.context
-                if context_file:
-                    # Try reverse lookup using the ContextFile.reverse_hash method
-                    from .context import ContextFile
-
-                    return ContextFile.reverse_hash(context_hash)
-
-        # Fallback: generate a context name based on the hash
-        return f"CTX_{context_hash:08X}"

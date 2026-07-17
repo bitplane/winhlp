@@ -182,6 +182,57 @@ class FontFile(InternalFile):
         self.parsed_charmaps = {}
         self._parse()
 
+    # OLDFONT.Attributes bit flags (helpdeco.h FONT_*)
+    _FONT_BOLD = 0x01
+    _FONT_ITAL = 0x02
+    _FONT_UNDR = 0x04
+    _FONT_STRK = 0x08
+    _FONT_DBUN = 0x10
+    _FONT_SMCP = 0x20
+
+    def get_font_attributes(self, font_index: Optional[int]) -> dict:
+        """Resolve a font-descriptor index into normalized character attributes.
+
+        Mirrors helpdeco's FontLoad (helpdeco.c:2160-2234): OLDFONT stores
+        bold/italic/underline/etc. as bits in a single Attributes byte and a
+        HalfPoints size, whereas NEWFONT/MVBFONT store each flag in its own byte,
+        derive bold from Weight > 500, and a size of -2 * Height.
+        Returns {} for an out-of-range or missing index.
+        """
+        if font_index is None or font_index < 0 or font_index >= len(self.descriptors):
+            return {}
+        d = self.descriptors[font_index]
+
+        if isinstance(d, OldFont):
+            a = d.attributes
+            attrs = {
+                "bold": bool(a & self._FONT_BOLD),
+                "italic": bool(a & self._FONT_ITAL),
+                "underline": bool(a & self._FONT_UNDR),
+                "strikethrough": bool(a & self._FONT_STRK),
+                "double_underline": bool(a & self._FONT_DBUN),
+                "small_caps": bool(a & self._FONT_SMCP),
+                "half_points": d.half_points,
+            }
+            facename_index = d.font_name_index
+        else:  # NewFont or MVBFont
+            attrs = {
+                "bold": getattr(d, "weight", 0) > 500,
+                "italic": bool(getattr(d, "italic", 0)),
+                "underline": bool(getattr(d, "underline", 0)),
+                "strikethrough": bool(getattr(d, "strike_out", 0)),
+                "double_underline": bool(getattr(d, "double_underline", 0)),
+                "small_caps": bool(getattr(d, "small_caps", 0)),
+                "half_points": -2 * getattr(d, "height", 0),
+            }
+            facename_index = getattr(d, "font_name", -1)
+
+        attrs["fg_rgb"] = d.fg_rgb
+        attrs["bg_rgb"] = d.bg_rgb
+        if 0 <= facename_index < len(self.facenames):
+            attrs["facename"] = self.facenames[facename_index]
+        return attrs
+
     def _parse(self):
         """
         Parses the |FONT file data.
@@ -268,10 +319,14 @@ class FontFile(InternalFile):
         Parses the font descriptors.
         """
         offset = self.header.descriptors_offset
-        is_mvp = self.system_file and hasattr(self.system_file, "is_mvp") and self.system_file.is_mvp
+        # helpdeco (FontLoad) chooses the descriptor layout from FacenamesOffset,
+        # NOT from the file version: >=16 MVBFONT (48B), >=12 NEWFONT (42B),
+        # otherwise OLDFONT (11B). Keying off the version misreads 3.1 files that
+        # still use OLDFONT descriptors (e.g. FacenamesOffset 8).
+        facenames_offset = self.header.facenames_offset
 
         for _ in range(self.header.num_descriptors):
-            if is_mvp:
+            if facenames_offset >= 16:
                 # MVBFont - parse according to helpdeco MVBFONT structure
                 # sizeof_MVBFONT = 48 bytes
                 raw_bytes = self.raw_data[offset : offset + 48]
@@ -334,7 +389,7 @@ class FontFile(InternalFile):
                     MVBFont(**parsed_descriptor, raw_data={"raw": raw_bytes, "parsed": parsed_descriptor})
                 )
                 offset += 48
-            elif self.system_file and self.system_file.header.minor > 16:
+            elif facenames_offset >= 12:
                 # NewFont - parse according to helpdeco NEWFONT structure
                 raw_bytes = self.raw_data[offset : offset + 42]
                 if len(raw_bytes) < 42:
@@ -403,13 +458,15 @@ class FontFile(InternalFile):
                 )
                 offset += len(raw_bytes)  # Advance by actual bytes read (39 or 42)
             else:
-                # OldFont
-                raw_bytes = self.raw_data[offset : offset + 8]
-                if len(raw_bytes) < 8:
+                # OldFont - sizeof_OLDFONT = 11 bytes (Attributes, HalfPoints,
+                # FontFamily, FontName u16, FGRGB[3], BGRGB[3]).
+                raw_bytes = self.raw_data[offset : offset + 11]
+                if len(raw_bytes) < 11:
                     break
 
                 attributes, half_points, font_family, font_name_index = struct.unpack("<BBBH", raw_bytes[:5])
                 fg_r, fg_g, fg_b = struct.unpack("<BBB", raw_bytes[5:8])
+                bg_r, bg_g, bg_b = struct.unpack("<BBB", raw_bytes[8:11])
 
                 parsed_descriptor = {
                     "attributes": attributes,
@@ -417,13 +474,13 @@ class FontFile(InternalFile):
                     "font_family": font_family,
                     "font_name_index": font_name_index,
                     "fg_rgb": (fg_r, fg_g, fg_b),
-                    "bg_rgb": (0, 0, 0),  # Not present in OldFont
+                    "bg_rgb": (bg_r, bg_g, bg_b),
                 }
 
                 self.descriptors.append(
                     OldFont(**parsed_descriptor, raw_data={"raw": raw_bytes, "parsed": parsed_descriptor})
                 )
-                offset += 8
+                offset += 11
 
     def _parse_styles(self):
         """

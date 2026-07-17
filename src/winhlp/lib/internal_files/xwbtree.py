@@ -94,8 +94,10 @@ class XWBTreeFile(InternalFile):
         if len(self.raw_data) < 9:  # Need at least file header
             return
 
-        # Skip the file header (parsed by Directory class)
-        btree_data = self.raw_data
+        # The keyword files are loaded including their 9-byte FILEHEADER, but the
+        # B+ tree magic/header starts after it. Skip it, or BTree sees a bogus
+        # magic (0x602f), raises, and the keyword map silently stays empty.
+        btree_data = self.raw_data[9:]
         try:
             self.btree = BTree(data=btree_data)
 

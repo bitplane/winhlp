@@ -12,7 +12,13 @@ dependencies = [
     "pydantic"
 ]
 
+[project.scripts]
+winhlp = "winhlp.__main__:main"
+
 [project.optional-dependencies]
+html = [
+    "pillow"  # optional: convert extracted bitmaps to PNG for --html output
+]
 dev = [
     "pre-commit",
     "pytest",
@@ -20,7 +26,8 @@ dev = [
     "pytest-cov",
     "build",
     "twine",
-    "ruff"
+    "ruff",
+    "pillow"
 ]
 
 [build-system]

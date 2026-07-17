@@ -1,7 +1,7 @@
 """Parser for the |SYSTEM internal file."""
 
 from .base import InternalFile
-from pydantic import BaseModel, Field, model_serializer
+from pydantic import BaseModel, Field
 from typing import Tuple, Optional, Any
 import struct
 
@@ -98,7 +98,10 @@ class SystemFile(InternalFile):
     groups: list = []  # Type 13: GROUPS definitions
     dllmaps: list = []  # Type 19: DLLMAPS definitions
     keyword_indices: list = []  # Characters that have keyword index files (from type 14 records)
-    parent_hlp: Any = None
+    # parent_hlp is a back-reference (circular); exclude=True keeps it out of
+    # model_dump() while letting Pydantic recursively serialize everything else
+    # (the old custom serializer returned a raw __dict__ of undumped submodels).
+    parent_hlp: Any = Field(default=None, exclude=True)
     is_mvp: bool = False  # Is this a MultiMedia Viewer file?
 
     def __init__(self, parent_hlp=None, **data):
@@ -106,13 +109,6 @@ class SystemFile(InternalFile):
         self.parent_hlp = parent_hlp
         self.is_mvp = self._detect_mvp()
         self._parse()
-
-    @model_serializer
-    def serialize_model(self):
-        """Custom serializer to exclude parent_hlp circular reference"""
-        data = self.__dict__.copy()
-        data.pop("parent_hlp", None)  # Remove circular reference
-        return data
 
     def _detect_mvp(self) -> bool:
         """
@@ -218,93 +214,6 @@ class SystemFile(InternalFile):
                 self.records.append({"type": record_type, "size": data_size, "data": record_data})
 
             offset += data_size
-
-    def _parse_sec_window(self, data: bytes):
-        """
-        Parses a SecWindow record.
-        """
-        offset = 0
-        flags = struct.unpack_from("<H", data, offset)[0]
-        offset += 2
-
-        type = b""
-        if flags & 0x01:
-            type = struct.unpack_from("<10s", data, offset)[0]
-            offset += 10
-
-        name = b""
-        if flags & 0x02:
-            name = struct.unpack_from("<9s", data, offset)[0]
-            offset += 9
-
-        caption = b""
-        if flags & 0x04:
-            caption = struct.unpack_from("<51s", data, offset)[0]
-            offset += 51
-
-        x = 0
-        if flags & 0x08:
-            x = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
-
-        y = 0
-        if flags & 0x10:
-            y = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
-
-        width = 0
-        if flags & 0x20:
-            width = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
-
-        height = 0
-        if flags & 0x40:
-            height = struct.unpack_from("<h", data, offset)[0]
-            offset += 2
-
-        maximize = 0
-        if flags & 0x80:
-            maximize = struct.unpack_from("<H", data, offset)[0]
-            offset += 2
-
-        rgb = (0, 0, 0)
-        if flags & 0x100:
-            r, g, b = struct.unpack_from("<BBB", data, offset)
-            offset += 3
-            rgb = (r, g, b)
-
-        unknown1 = 0
-        if flags & 0x200:
-            unknown1 = struct.unpack_from("<H", data, offset)[0]
-            offset += 2
-
-        rgb_nsr = (0, 0, 0)
-        if flags & 0x400:
-            r, g, b = struct.unpack_from("<BBB", data, offset)
-            offset += 3
-            rgb_nsr = (r, g, b)
-
-        unknown2 = 0
-        if flags & 0x800:
-            unknown2 = struct.unpack_from("<H", data, offset)[0]
-            offset += 2
-
-        parsed_record = {
-            "flags": flags,
-            "type": type,
-            "name": name,
-            "caption": caption,
-            "x": x,
-            "y": y,
-            "width": width,
-            "height": height,
-            "maximize": maximize,
-            "rgb": rgb,
-            "unknown1": unknown1,
-            "rgb_nsr": rgb_nsr,
-            "unknown2": unknown2,
-        }
-        self.records.append(SecWindow(**parsed_record, raw_data={"raw": data, "parsed": parsed_record}))
 
     def _parse_key_index(self, data: bytes):
         """
@@ -427,14 +336,6 @@ class SystemFile(InternalFile):
         parsed_record = {"contents_offset": contents_offset}
         self.records.append(
             {"type": "CONTENTS", "contents_offset": contents_offset, "raw_data": {"raw": data, "parsed": parsed_record}}
-        )
-
-    def _parse_macro(self, data: bytes):
-        """Parses a MACRO record (record type 4)."""
-        macro_text = self._decode_text(data.split(b"\x00")[0])
-        parsed_record = {"macro_text": macro_text}
-        self.records.append(
-            {"type": "MACRO", "macro_text": macro_text, "raw_data": {"raw": data, "parsed": parsed_record}}
         )
 
     def _parse_citation(self, data: bytes):

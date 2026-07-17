@@ -89,9 +89,11 @@ class PhraseFile(InternalFile):
             phrase_data_start = offset + phrase_offsets_size
             phrase_data_length = len(self.raw_data) - phrase_data_start
 
-        # Read phrase offsets
+        # Read phrase offsets. helpdeco (PhraseLoad) subtracts a constant base of
+        # (PhraseCount+1)*2 from every stored offset in ALL versions — the
+        # DecompressedSize DWORD (already consumed above) is NOT part of the base.
         phrase_offsets = []
-        base_offset = phrase_offsets_size + (0 if before31 else 4)  # Adjust for decompressed_size field
+        base_offset = phrase_offsets_size
 
         for i in range(self.phrase_count + 1):
             if offset + 2 > len(self.raw_data):

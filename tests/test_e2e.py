@@ -11,6 +11,10 @@ def get_all_hlp_files():
     data_dir = os.path.join(os.path.dirname(__file__), "data")
 
     for root, dirs, files in os.walk(data_dir):
+        # Skip the raw corpus/ tree: it is collector *input* (thousands of files),
+        # not a curated test set. The collector distils it into coverage/ + errors/.
+        if "corpus" in dirs:
+            dirs.remove("corpus")
         for file in files:
             if file.upper().endswith(".HLP"):
                 hlp_files.append(os.path.join(root, file))

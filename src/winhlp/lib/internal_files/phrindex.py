@@ -164,7 +164,9 @@ class PhrIndexFile(InternalFile):
         """Parse Hall compression phrase offsets using bit-stream algorithm from helldeco.c"""
         # Initialize GetBit state to match helldeco.c exactly
         self._init_getbit()
-        self._current_dword_pos = 30  # Skip past header (30 bytes)
+        # The GetBit stream starts right after the PHRINDEXHDR. That header is
+        # sizeof_PHRINDEXHDR = 6*DWORD + 2*WORD = 28 bytes (helpdeco.h), not 30.
+        self._current_dword_pos = 28
 
         # Calculate phrase offsets using exact algorithm from helldeco.c PhraseLoad()
         phrase_offsets = [0]  # PhraseOffsets[0] = offset; (offset starts at 0)
@@ -239,7 +241,10 @@ class PhrIndexFile(InternalFile):
         """Get next bit from PhrIndex data (exact implementation of helldeco.c GetBit)"""
         # static uint32_t mask; static uint32_t value;
         # if (f) {
-        self._mask <<= 1  # mask <<= 1;
+        # C uses a uint32_t mask, so `mask <<= 1` wraps to 0 after bit 31 and a
+        # fresh dword is read every 32 bits. Python ints are unbounded, so mask
+        # it back to 32 bits or the reload never fires (same bug class as LZ77).
+        self._mask = (self._mask << 1) & 0xFFFFFFFF  # mask <<= 1;
         if not self._mask:  # if (!mask) {
             self._value = self._get_dword()  # value = getdw(f);
             self._mask = 1  # mask = 1L;

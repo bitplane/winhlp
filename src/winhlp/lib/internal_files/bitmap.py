@@ -76,7 +76,76 @@ class BitmapFile(InternalFile):
         if len(self.raw_data) < 32:  # Need minimum header size
             return
 
+        # Named MediaView bitmaps (e.g. bt_1.bmp) can be complete Windows BMP
+        # files rather than the internal lP/SHG picture format. Detect that and
+        # pass the bytes through verbatim; parsing them as lP yields garbage.
+        if self.raw_data[:2] == b"BM":
+            self._parse_raw_bmp()
+            return
+
+        # Proper lP/SHG/MRB picture decode (magic 0x506C/0x706C). The legacy
+        # _parse_bitmap_data() reads the lP header as raw DIB fields and yields
+        # garbage dimensions, so use the real decoder instead.
+        magic = struct.unpack_from("<H", self.raw_data, 0)[0]
+        if magic in (0x506C, 0x706C):
+            from ..picture import decode_picture
+
+            decoded = decode_picture(self.raw_data)
+            if decoded:
+                self._parse_decoded_picture(*decoded)
+                return
+
         self._parse_bitmap_data()
+
+    def _parse_decoded_picture(self, ext: str, data: bytes):
+        """Store an already-decoded picture (complete .bmp or raw .wmf bytes)."""
+        header = BitmapHeader(
+            x_pels=0,
+            y_pels=0,
+            planes=1,
+            bit_count=0,
+            width=0,
+            height=0,
+            colors_used=0,
+            colors_important=0,
+            data_size=len(data),
+            hotspot_size=0,
+            picture_offset=0,
+            hotspot_offset=0,
+            raw_data={},
+        )
+        self.bitmaps.insert(
+            0, ExtractedBitmap(header=header, bitmap_data=data, hotspots=[], format_type=f"ready:{ext}", raw_data={})
+        )
+
+    def _parse_raw_bmp(self):
+        """Wrap an already-complete Windows .bmp so extract_image serves it as-is."""
+        data = self.raw_data
+        try:
+            width = struct.unpack_from("<l", data, 18)[0]
+            height = struct.unpack_from("<l", data, 22)[0]
+            planes = struct.unpack_from("<H", data, 26)[0]
+            bit_count = struct.unpack_from("<H", data, 28)[0]
+        except struct.error:
+            width = height = planes = bit_count = 0
+        header = BitmapHeader(
+            x_pels=0,
+            y_pels=0,
+            planes=planes,
+            bit_count=bit_count,
+            width=width,
+            height=height,
+            colors_used=0,
+            colors_important=0,
+            data_size=len(data),
+            hotspot_size=0,
+            picture_offset=0,
+            hotspot_offset=0,
+            raw_data={},
+        )
+        self.bitmaps = [
+            ExtractedBitmap(header=header, bitmap_data=data, hotspots=[], format_type="rawbmp", raw_data={})
+        ]
 
     def _parse_bitmap_data(self):
         """
@@ -313,6 +382,33 @@ class BitmapFile(InternalFile):
 
         except (struct.error, ValueError):
             return None
+
+    def extract_image(self, bitmap_index: int = 0) -> Optional[tuple]:
+        """Extract a picture as (extension, bytes), for any picture type.
+
+        Bitmaps (DDB/DIB) are wrapped as a standard .bmp; metafiles (type 8) are
+        returned as raw .wmf metafile bytes. helpdeco writes a placeable-metafile
+        header for WMFs, but the bare metafile record stream is the portable form
+        and is what the decompressed picture data already contains.
+        Returns None if the index is out of range.
+        """
+        if bitmap_index >= len(self.bitmaps):
+            return None
+        bitmap = self.bitmaps[bitmap_index]
+        if bitmap.format_type == "rawbmp":
+            # Already a complete .bmp file; serve verbatim.
+            return ("bmp", bitmap.bitmap_data)
+        if bitmap.format_type.startswith("ready:"):
+            # Decoded lP/SHG picture: bytes are a complete .bmp or raw metafile.
+            return (bitmap.format_type.split(":", 1)[1], bitmap.bitmap_data)
+        if bitmap.format_type in ("bmp", "shg"):
+            data = self.extract_bitmap_as_bmp(bitmap_index)
+            return ("bmp", data) if data is not None else None
+        if bitmap.format_type in ("wmf", "mrb"):
+            # Metafile / multi-resolution: the decompressed payload is the image.
+            return ("wmf" if bitmap.format_type == "wmf" else "mrb", bitmap.bitmap_data)
+        # DDB and anything else: return the decompressed bytes unwrapped.
+        return (bitmap.format_type, bitmap.bitmap_data)
 
     def get_hotspot_context_names(self) -> Dict[int, str]:
         """

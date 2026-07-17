@@ -28,6 +28,7 @@ from .internal_files.grp import GRPFile
 from .internal_files.chartab import ChartabFile
 from .internal_files.gid import WinPosFile, PeteFile, FlagsFile, CntJumpFile, CntTextFile
 from .exceptions import InvalidHLPFileError
+import os
 import struct
 
 
@@ -90,6 +91,13 @@ class HelpFile(BaseModel):
     flags: Optional[FlagsFile] = None
     cntjump: Optional[CntJumpFile] = None
     cnttext: Optional[CntTextFile] = None
+
+    # Non-fatal per-file parse errors, so one malformed internal file yields a
+    # partial result (and a visible diagnostic) instead of aborting the whole file.
+    parse_errors: List[Dict[str, str]] = []
+
+    # Annotations loaded from a sibling .ANN sidecar file (if present).
+    annotations: List[Dict[str, Any]] = []
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
@@ -202,20 +210,24 @@ class HelpFile(BaseModel):
         self.directory = self._parse_directory()
         self.system = self._parse_system()
         self.font = self._parse_font()
-        self.topic = self._parse_topic()
-        self.context = self._parse_context()
+
+        # Phrase tables must be parsed BEFORE |TOPIC: LinkData2 in topic records
+        # is phrase/Hall compressed and needs these tables to decompress.
         self.phrase = self._parse_phrase()
-        self.tomap = self._parse_tomap()
-        self.ctxomap = self._parse_ctxomap()
-        self.catalog = self._parse_catalog()
-        self.viola = self._parse_viola()
-        self.gmacros = self._parse_gmacros()
         self.phrindex = self._parse_phrindex()
         self.phrimage = self._parse_phrimage()
 
         # Complete phrase parsing after both PhrIndex and PhrImage are available
         if self.phrindex and self.phrimage:
             self.phrindex.complete_phrase_parsing(self.phrimage)
+
+        self.topic = self._parse_topic()
+        self.context = self._parse_context()
+        self.tomap = self._parse_tomap()
+        self.ctxomap = self._parse_ctxomap()
+        self.catalog = self._parse_catalog()
+        self.viola = self._parse_viola()
+        self.gmacros = self._parse_gmacros()
 
         self.topicid = self._parse_topicid()
         self.ttlbtree = self._parse_ttlbtree()
@@ -235,6 +247,159 @@ class HelpFile(BaseModel):
             self.cnttext = self._parse_cnttext()
         self.chartab_files = self._parse_chartab_files()
         self.bitmaps = self._parse_bitmaps()
+
+        # Load a sibling .ANN annotation sidecar, if one exists.
+        self._load_annotations()
+
+        # Now that every internal file is parsed, join the cross-file relations
+        # (context names, keywords, browse chains) onto the topics.
+        self._resolve_cross_references()
+
+    def _load_annotations(self):
+        """Load annotations from a sibling <name>.ANN file and attach by offset.
+
+        Annotation files use the same container format as .HLP but live beside
+        the help file (WinHelp writes them when the user annotates a topic).
+        """
+        if not self.filepath:
+            return
+        base = os.path.splitext(self.filepath)[0]
+        ann_path = None
+        for candidate in (base + ".ANN", base + ".ann"):
+            if os.path.exists(candidate):
+                ann_path = candidate
+                break
+        if ann_path is None:
+            return
+        try:
+            # Lazy import: ann.py imports HelpFile, so importing it at module
+            # load time would be circular.
+            from .ann import AnnotationFile
+
+            ann = AnnotationFile(filepath=ann_path)
+            self.annotations = ann.get_annotations()
+        except Exception as e:
+            self.parse_errors.append({"file": os.path.basename(ann_path), "error": f"{type(e).__name__}: {e}"})
+            return
+
+        # Attach annotation text to the topic at each annotation's offset.
+        if self.topic:
+            by_offset = {t.topic_offset: t for t in self.topic.get_all_topics() if t.topic_offset is not None}
+            for ann_entry in self.annotations:
+                topic = by_offset.get(ann_entry.get("topic_offset"))
+                if topic is not None:
+                    topic.annotations.append(ann_entry.get("text", ""))
+
+    # --- Derived cross-reference resolution ---------------------------------
+
+    def _build_name_map(self) -> Dict[int, str]:
+        """Map context-id hash -> best-known human-readable name.
+
+        helpdeco recovers real context ids by collecting candidate names (from
+        keyword footnotes and topic titles), hashing them, and matching those
+        hashes against the |CONTEXT hash values (Guess/Derive/GuessFromKeywords).
+        Only hashes without a real candidate fall back to the synthetic unhash().
+        """
+        name_map: Dict[int, str] = {}
+
+        def add(name: str):
+            if not name:
+                return
+            try:
+                # |CONTEXT stores hashes as signed int32; normalize to unsigned so
+                # candidate hashes and stored hashes compare on the same domain.
+                name_map.setdefault(ContextFile.calculate_hash(name) & 0xFFFFFFFF, name)
+            except Exception:
+                pass
+
+        # Candidate names from keyword footnotes (real, author-written strings).
+        for group in (self.keyword_search_files, self.keyword_index_files):
+            for entry in group.values():
+                btree = entry.get("btree") if isinstance(entry, dict) else None
+                if btree and getattr(btree, "keyword_map", None):
+                    for keyword in btree.keyword_map:
+                        add(keyword)
+        # Candidate names from topic titles.
+        if self.topic:
+            for topic in self.topic.get_all_topics():
+                add(topic.title)
+        return name_map
+
+    def _keyword_offset_index(self) -> Dict[int, List[str]]:
+        """Invert the keyword search files into topic_offset -> [footnote keywords]."""
+        index: Dict[int, List[str]] = {}
+        for char, entry in self.keyword_search_files.items():
+            btree = entry.get("btree")
+            data = entry.get("data")
+            if not btree or not data or not getattr(btree, "keyword_map", None):
+                continue
+            offsets = getattr(data, "topic_offsets", []) or []
+            for keyword, leaf in btree.keyword_map.items():
+                start = getattr(leaf, "kw_data_offset", None)
+                count = getattr(leaf, "count", 0)
+                if start is None:
+                    continue
+                for off in offsets[start : start + count]:
+                    index.setdefault(off, []).append(f"{char}:{keyword}")
+        return index
+
+    def _resolve_cross_references(self):
+        """Attach context names, keywords and browse neighbours to each topic."""
+        if not self.topic:
+            return
+        topics = self.topic.get_all_topics()
+        located = [t for t in topics if t.topic_offset is not None]
+        if not located:
+            return
+
+        # offset -> topic, plus a sorted offset list for range lookups.
+        by_offset = {t.topic_offset: t for t in located}
+        sorted_offsets = sorted(by_offset)
+
+        def topic_for_offset(off):
+            """Topic whose range [topic_offset, next) contains off (helpdeco rule)."""
+            if off is None:
+                return None
+            if off in by_offset:
+                return by_offset[off]
+            import bisect
+
+            i = bisect.bisect_right(sorted_offsets, off) - 1
+            return by_offset[sorted_offsets[i]] if i >= 0 else None
+
+        # 1. Context names: resolve every |CONTEXT hash to a name and attach it to
+        #    the topic containing its offset. Recovery order mirrors helpdeco:
+        #    (a) a keyword/title candidate whose hash matches, (b) Derive() a real
+        #    id from the owning topic's title, (c) synthetic unhash() as last resort.
+        if self.context and self.context.context_map:
+            name_map = self._build_name_map()
+            win95 = bool(self.system and self.system.header and self.system.header.minor >= 33)
+            for hash_value, off in self.context.context_map.items():
+                topic = topic_for_offset(off)
+                name = name_map.get(hash_value & 0xFFFFFFFF)
+                if name is None and topic is not None and topic.title:
+                    name = ContextFile.derive_from_title(topic.title, hash_value, win95=win95)
+                if name is None:
+                    name = ContextFile.reverse_hash(hash_value)
+                if topic is not None and name not in topic.context_names:
+                    topic.context_names.append(name)
+
+        # 2. Keywords: attach K/A footnote keywords by topic offset.
+        for off, keywords in self._keyword_offset_index().items():
+            topic = topic_for_offset(off)
+            if topic is not None:
+                for kw in keywords:
+                    if kw not in topic.keywords:
+                        topic.keywords.append(kw)
+
+        # 3. Browse chains: resolve browse-back/forward offsets to topic numbers.
+        for topic in located:
+            back = topic_for_offset(topic.browse_back) if topic.browse_back not in (None, -1) else None
+            forward = topic_for_offset(topic.browse_forward) if topic.browse_forward not in (None, -1) else None
+            if back is not None and back is not topic:
+                topic.browse_prev_topic = back.topic_number
+            if forward is not None and forward is not topic:
+                topic.browse_next_topic = forward.topic_number
 
     def _parse_header(self) -> HLPHeader:
         """
@@ -294,7 +459,15 @@ class HelpFile(BaseModel):
         The directory is a B+ tree that maps internal filenames to their data.
         The parsing logic will be implemented in the Directory class.
         """
-        dir_data = self.data[self.header.directory_start :]
+        # A truncated file (e.g. a split-archive fragment) can carry a valid
+        # magic but a directory_start pointing past EOF. Detect that here and
+        # raise a typed error so callers can tell a bad file from a parser bug.
+        dir_start = self.header.directory_start
+        if dir_start < 0 or dir_start + 9 > len(self.data):
+            raise InvalidHLPFileError(
+                f"Directory offset {dir_start} is past end of file ({len(self.data)} bytes); file is truncated"
+            )
+        dir_data = self.data[dir_start:]
         return Directory(data=dir_data)
 
     def _load_internal_file(self, filename: str, parser_class, **kwargs):
@@ -335,8 +508,14 @@ class HelpFile(BaseModel):
         # Extract file content
         file_data = self.data[file_offset + 9 : file_offset + 9 + used_space]
 
-        # Instantiate parser with extracted data
-        return parser_class(filename=filename, raw_data=file_data, **kwargs)
+        # Instantiate parser with extracted data. A malformed internal file
+        # should degrade to a missing entry plus a recorded diagnostic, not abort
+        # parsing of the whole help file.
+        try:
+            return parser_class(filename=filename, raw_data=file_data, **kwargs)
+        except Exception as e:
+            self.parse_errors.append({"file": filename, "error": f"{type(e).__name__}: {e}"})
+            return None
 
     def _parse_system(self) -> SystemFile:
         """
@@ -481,32 +660,38 @@ class HelpFile(BaseModel):
 
     def _parse_bitmaps(self) -> Dict[str, BitmapFile]:
         """
-        Parses all bitmap files (|bm0, |bm1, |bm2, etc.) in the directory.
+        Parses bitmap files in the directory.
+
+        Covers |bmN (WinHelp 3.1+), bmN (HC30, no pipe), and the named bitmap
+        resources MediaView (.MVB) stores (e.g. about.shg, bt_1.bmp) which are
+        either the internal lP/SHG format or complete Windows .bmp files.
         """
         bitmaps = {}
 
-        # Look for all bitmap files in the directory
         for filename, offset in self.directory.files.items():
-            if filename.startswith("|bm") and len(filename) > 3:
-                # Extract bitmap number (e.g., |bm0 -> 0, |bm123 -> 123)
-                bitmap_num = filename[3:]
-                if bitmap_num.isdigit():
-                    try:
-                        # Read the file header to know the size
-                        file_header_data = self.data[offset : offset + 9]
-                        if len(file_header_data) >= 9:
-                            reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-                            # Extract bitmap data
-                            bitmap_data = self.data[offset + 9 : offset + 9 + used_space]
-                            bitmap_file = BitmapFile(filename=filename, raw_data=bitmap_data)
-                            bitmaps[filename] = bitmap_file
-
-                    except (struct.error, IndexError):
-                        # Skip malformed bitmap files
-                        continue
+            if not self._is_bitmap_filename(filename):
+                continue
+            try:
+                file_header_data = self.data[offset : offset + 9]
+                if len(file_header_data) < 9:
+                    continue
+                reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
+                bitmap_data = self.data[offset + 9 : offset + 9 + used_space]
+                bitmaps[filename] = BitmapFile(filename=filename, raw_data=bitmap_data)
+            except (struct.error, IndexError):
+                continue
 
         return bitmaps
+
+    @staticmethod
+    def _is_bitmap_filename(filename: str) -> bool:
+        """Whether a directory entry names a bitmap resource."""
+        # |bmN and HC30 bmN
+        stripped = filename[1:] if filename.startswith("|") else filename
+        if stripped.startswith("bm") and stripped[2:].isdigit():
+            return True
+        # Named MediaView resources.
+        return filename.lower().endswith((".bmp", ".shg", ".mrb", ".wmf"))
 
     def _parse_keyword_search_files(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -1016,8 +1201,10 @@ class HelpFile(BaseModel):
                     grp_file = GRPFile(grp_data, help_file=self)
                     grp_files[filename] = grp_file
 
-                except (struct.error, IndexError, ValueError):
-                    # Skip malformed GRP files
+                except Exception as e:
+                    # A malformed/unsupported GRP file must not abort the whole
+                    # help file; record it and move on.
+                    self.parse_errors.append({"file": filename, "error": f"{type(e).__name__}: {e}"})
                     continue
 
         return grp_files

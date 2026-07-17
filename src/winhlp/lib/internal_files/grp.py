@@ -9,8 +9,8 @@ Based on the helpdeco C reference implementation and documentation.
 """
 
 import struct
-from typing import List, Optional, Dict
-from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
 
 from .base import InternalFile
 
@@ -50,17 +50,22 @@ class GRPFile(InternalFile):
     - Optional bitmap data
     """
 
-    def __init__(self, data: bytes, help_file=None):
-        super().__init__(data, help_file)
-        self.header: Optional[GroupHeader] = None
-        self.topic_ranges: List[TopicRange] = []
-        self.bitmap_data: Optional[bytes] = None
-        self.topic_to_group: Dict[int, int] = {}  # Maps topic number to group ID
+    header: Optional[GroupHeader] = None
+    topic_ranges: List[TopicRange] = []
+    bitmap_data: Optional[bytes] = None
+    topic_to_group: Dict[int, int] = {}  # Maps topic number to group ID
+    help_file: Any = Field(default=None, exclude=True)  # circular back-ref, not serialized
+
+    def __init__(self, data: bytes, help_file=None, filename: str = "|GRP"):
+        super().__init__(filename=filename, raw_data=data)
+        self.help_file = help_file
+        self.topic_ranges = []
+        self.topic_to_group = {}
         self._parse()
 
     def _parse(self):
         """Parse the GRP file structure."""
-        if len(self.data) < 12:  # Need at least header
+        if len(self.raw_data) < 12:  # Need at least header
             return
 
         try:
@@ -75,14 +80,14 @@ class GRPFile(InternalFile):
 
     def _parse_header(self):
         """Parse the GROUP header structure."""
-        if len(self.data) < 12:
+        if len(self.raw_data) < 12:
             return
 
         try:
             # Read header fields
-            magic = struct.unpack_from("<L", self.data, 0)[0]
-            bitmap_size = struct.unpack_from("<L", self.data, 4)[0]
-            last_topic = struct.unpack_from("<L", self.data, 8)[0]
+            magic = struct.unpack_from("<L", self.raw_data, 0)[0]
+            bitmap_size = struct.unpack_from("<L", self.raw_data, 4)[0]
+            last_topic = struct.unpack_from("<L", self.raw_data, 8)[0]
 
             # Validate magic number
             if magic != 0x000A3333:
@@ -109,24 +114,24 @@ class GRPFile(InternalFile):
 
     def _parse_topic_ranges(self):
         """Parse topic ranges and group assignments."""
-        if not self.header or len(self.data) < 16:
+        if not self.header or len(self.raw_data) < 16:
             return
 
         offset = 12  # After header
 
         try:
             # Parse topic ranges until we hit bitmap data or end of file
-            while offset + 12 <= len(self.data):
+            while offset + 12 <= len(self.raw_data):
                 # Try to read what looks like a topic range entry
                 # Format is not fully documented, so we make educated guesses
 
-                start_topic = struct.unpack_from("<L", self.data, offset)[0]
+                start_topic = struct.unpack_from("<L", self.raw_data, offset)[0]
                 offset += 4
 
-                end_topic = struct.unpack_from("<L", self.data, offset)[0]
+                end_topic = struct.unpack_from("<L", self.raw_data, offset)[0]
                 offset += 4
 
-                group_id = struct.unpack_from("<L", self.data, offset)[0]
+                group_id = struct.unpack_from("<L", self.raw_data, offset)[0]
                 offset += 4
 
                 # Sanity check: topic numbers should be reasonable
@@ -165,8 +170,8 @@ class GRPFile(InternalFile):
         ranges_size = len(self.topic_ranges) * 12  # Each range is 12 bytes
         bitmap_start = header_size + ranges_size
 
-        if bitmap_start < len(self.data) and self.header.bitmap_size > 0:
-            remaining_data = self.data[bitmap_start:]
+        if bitmap_start < len(self.raw_data) and self.header.bitmap_size > 0:
+            remaining_data = self.raw_data[bitmap_start:]
 
             # Take up to bitmap_size bytes for bitmap data
             bitmap_size = min(self.header.bitmap_size, len(remaining_data))
@@ -209,5 +214,5 @@ class GRPFile(InternalFile):
             "group_count": len(set(self.topic_to_group.values())),
             "has_bitmap": self.has_bitmap(),
             "bitmap_size": len(self.bitmap_data) if self.bitmap_data else 0,
-            "raw_data_size": len(self.data),
+            "raw_data_size": len(self.raw_data),
         }

@@ -101,8 +101,7 @@ class CntJumpFile(InternalFile):
 
         try:
             self.btree = BTree(data=self.raw_data)
-            # TODO: Parse jump references from B+ tree entries
-            # This would require understanding the specific entry format
+            self.jump_references = _extract_btree_string_keys(self.btree)
         except Exception:
             pass
 
@@ -132,7 +131,34 @@ class CntTextFile(InternalFile):
 
         try:
             self.btree = BTree(data=self.raw_data)
-            # TODO: Parse topic titles from B+ tree entries
-            # This would require understanding the specific entry format
+            self.topic_titles = _extract_btree_string_keys(self.btree)
         except Exception:
             pass
+
+
+def _extract_btree_string_keys(btree) -> List[str]:
+    """Extract the NUL-terminated string key of each leaf entry from a B+ tree.
+
+    The precise leaf record layout of |CntJump/|CntText is undocumented, but in
+    every WinHelp B+ tree the entry begins with a NUL-terminated key string
+    (here the jump reference / topic title) followed by a value. We read the key
+    and skip a 4-byte value (the common stride); a malformed page just stops that
+    page early. Best-effort: no corpus GID files exist to validate against.
+    """
+    keys: List[str] = []
+    try:
+        for page, n_entries in btree.iterate_leaf_pages():
+            offset = 8  # leaf-page header
+            for _ in range(n_entries):
+                if offset >= len(page):
+                    break
+                end = page.find(b"\x00", offset)
+                if end == -1:
+                    break
+                key = page[offset:end].decode("cp1252", errors="replace")
+                if key:
+                    keys.append(key)
+                offset = end + 1 + 4  # skip NUL + assumed 4-byte value
+    except Exception:
+        pass
+    return keys

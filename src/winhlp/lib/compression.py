@@ -26,7 +26,10 @@ def lz77_decompress(data: bytes) -> bytes:
 
     while offset < data_len:
         if mask == 0:
-            # Need new control byte
+            # Need new control byte. The C reference (helpdec1.c) declares the
+            # bit mask as an `unsigned char`, so after shifting past bit 7 it
+            # wraps back to 0 and a fresh control byte is read every 8 bits.
+            # `mask` is masked to a byte on shift below to reproduce that.
             if offset >= data_len:
                 break
             bits = data[offset]
@@ -73,7 +76,7 @@ def lz77_decompress(data: bytes) -> bytes:
             output.append(char)
             pos += 1
 
-        mask <<= 1
+        mask = (mask << 1) & 0xFF
 
     return bytes(output)
 
@@ -98,8 +101,8 @@ def phrase_decompress(data: bytes, phrases: List[str]) -> bytes:
         ch = data[offset]
         offset += 1
 
-        if ch == 0 or ch >= 15:
-            # Literal character
+        if ch == 0 or ch >= 16:
+            # Literal character (helpdeco treats CurChar 1..15 as a phrase ref).
             output.append(ch)
         else:
             # Phrase reference
@@ -117,7 +120,7 @@ def phrase_decompress(data: bytes, phrases: List[str]) -> bytes:
             # Emit the phrase if it exists
             if 0 <= phrase_num < len(phrases):
                 phrase = phrases[phrase_num]
-                output.extend(phrase.encode("latin-1"))
+                output.extend(phrase.encode("cp1252", errors="replace"))
                 if add_space:
                     output.append(ord(" "))
 
@@ -150,17 +153,18 @@ def hall_decompress(data: bytes, phrases: List[str]) -> bytes:
             phrase_num = ch // 2
             if 0 <= phrase_num < len(phrases):
                 phrase = phrases[phrase_num]
-                output.extend(phrase.encode("latin-1"))
+                output.extend(phrase.encode("cp1252", errors="replace"))
         elif ch & 0x03 == 0x01:
-            # Least two bits are 01: multiply by 64, add 64 and next character
+            # Least two bits are 01: phrases 128..16511.
+            # helpdeco: CurChar = 128 + (CurChar/4)*256 + *str; PrintPhrase(CurChar)
             if offset >= len(data):
                 break
             next_ch = data[offset]
             offset += 1
-            phrase_num = (ch // 4) * 64 + 64 + next_ch
+            phrase_num = 128 + (ch // 4) * 256 + next_ch
             if 0 <= phrase_num < len(phrases):
                 phrase = phrases[phrase_num]
-                output.extend(phrase.encode("latin-1"))
+                output.extend(phrase.encode("cp1252", errors="replace"))
         elif ch & 0x07 == 0x03:
             # Least three bits are 011: copy literal characters
             count = ch // 8 + 1

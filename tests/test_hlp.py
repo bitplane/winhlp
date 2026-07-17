@@ -2,7 +2,7 @@
 
 import os
 from winhlp.lib.hlp import HelpFile
-from winhlp.lib.internal_files.font import NewFont
+from winhlp.lib.internal_files.font import OldFont
 
 
 def test_parse_header():
@@ -142,15 +142,26 @@ def test_parse_font_descriptors():
     assert len(hlp_file.font.descriptors) > 0
 
 
-def test_parse_font_descriptors_newfont():
-    """Tests parsing of the |FONT file NewFont descriptors."""
+def test_parse_font_descriptors_oldfont():
+    """Tests parsing of the |FONT file descriptors.
+
+    SMARTTOP is a WinHelp 3.1 file, but its FacenamesOffset (8) is < 12, so
+    helpdeco parses its descriptors as OLDFONT (11 bytes each), not NEWFONT.
+    The descriptor layout is chosen by FacenamesOffset, not the file version.
+    """
     filepath = os.path.join(os.path.dirname(__file__), "data", "SMARTTOP.HLP")
     hlp_file = HelpFile(filepath=filepath)
 
     assert hlp_file.font is not None
     assert hlp_file.font.descriptors is not None
-    assert len(hlp_file.font.descriptors) > 0
-    assert isinstance(hlp_file.font.descriptors[0], NewFont)
+    # Header advertises 8 descriptors; all must parse (11 bytes each).
+    assert len(hlp_file.font.descriptors) == hlp_file.font.header.num_descriptors
+    assert isinstance(hlp_file.font.descriptors[0], OldFont)
+
+    # Resolved attributes should be sane: a real facename and a plausible size.
+    attrs = hlp_file.font.get_font_attributes(0)
+    assert attrs["facename"] in hlp_file.font.facenames
+    assert 8 <= attrs["half_points"] <= 200
 
 
 def test_parse_font_facenames_detailed():
