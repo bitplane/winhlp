@@ -5,7 +5,8 @@ the help format used from Windows 3.0 through Windows 95. It parses a help file
 into a structured object model and can export it to JSON or a single browsable
 HTML page.
 
-Based on helpdeco by Manfred Winterhoff, Ben Collver + Paul Wise.
+Based on helpdeco by Manfred Winterhoff, Ben Collver + Paul Wise, therefore
+GPL licensed.
 
 ## Install
 

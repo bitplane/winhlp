@@ -1,7 +1,7 @@
 [project]
 name = "winhlp"
 description = "Windows HLP file reader"
-version = "0.0.1"
+version = "0.1.0"
 authors = [
     { name = "Gareth Davidson", email = "gaz@bitplane.net" }
 ]
@@ -11,6 +11,11 @@ requires-python = ">=3.10"
 dependencies = [
     "pydantic"
 ]
+
+[project.urls]
+Homepage = "https://bitplane.net/dev/python/winhlp"
+Repository = "https://github.com/bitplane/winhlp"
+"Bug Tracker" = "https://github.com/bitplane/winhlp/issues"
 
 [project.scripts]
 winhlp = "winhlp.__main__:main"
