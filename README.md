@@ -1,12 +1,17 @@
 # winhlp
 
 A pure-Python parser for Windows Help (`.hlp`) and MediaView (`.mvb`) files —
-the help format used from Windows 3.0 through Windows 95. It parses a help file
-into a structured object model and can export it to JSON or a single browsable
-HTML page.
+the help format used from Windows 3.0 through Windows 95 before everything
+went all chmmy. It parses a help file into a structured object model and
+can export it to JSON or a single browsable HTML page.
 
-Based on helpdeco by Manfred Winterhoff, Ben Collver + Paul Wise, therefore
+Based on helpdeco by Manfred Winterhoff, Ben Collver, and Paul Wise, therefore
 GPL licensed.
+
+* [🏠 home](https://bitplane.net/dev/python/winhlp)
+  * [📖 helpfile](https://bitplane.net/dev/python/winhlp/helpfile)
+* [😺 src](https://github.com/bitplane/winhlp)
+* [🐍 pypi](https://pypi.org/project/winhlp)
 
 ## Install
 
@@ -64,9 +69,6 @@ make dev       # set up the venv + pre-commit hooks
 make test      # run the test suite
 make coverage  # HTML coverage report in htmlcov/
 ```
-
-`doc/helpfile.md` is the authoritative format reference and `doc/ref/` holds the
-original helpdeco C source the parsers were ported from.
 
 ## License
 
