@@ -47,7 +47,7 @@ def test_navigation_history_and_popup_resolution():
 
 
 def test_topic_content_blocks_preserve_table_position_and_legacy_lists():
-    hlp = HelpFile(filepath=os.path.join(DATA, "coverage", "ELSA_DE.HLP"))
+    hlp = HelpFile(filepath=os.path.join(DATA, "win95", "MSNINT.HLP"))
     topic = next(topic for topic in hlp.get_topics() if topic.tables)
     kinds = [block.kind for block in topic.content_blocks]
 

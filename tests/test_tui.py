@@ -5,7 +5,7 @@ import os
 import pytest
 from rich.text import Text
 from winhlp.lib.hlp import HelpFile
-from winhlp.lib.internal_files.topic import TextSpan
+from winhlp.lib.internal_files.topic import ParsedTopic, TextSpan, TopicTextBlock
 from winhlp.tui import DiagnosticPopup, InformationPopup, TopicPopup, TopicView, WinHlpApp, _span_style, _span_text
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
@@ -106,11 +106,18 @@ async def test_indexed_bitmap_resources_are_rendered_inline():
 
 @pytest.mark.asyncio
 async def test_mediaview_button_is_a_macro_target_not_an_image():
-    app = WinHlpApp(HelpFile(filepath=os.path.join(DATA, "coverage", "mplayer_1.hlp")))
+    app = WinHlpApp(HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")))
+    marker = 'window:inline:!,AL("RELATED_ONE;RELATED_TWO")'
+    topic = ParsedTopic(
+        title="Synthetic MediaView button",
+        text_spans=[TextSpan(text="", embedded_image=marker, raw_data={})],
+        content_blocks=[TopicTextBlock(text_spans=[TextSpan(text="", embedded_image=marker, raw_data={})])],
+        raw_data={},
+    )
 
     async with app.run_test(size=(100, 30)) as pilot:
         view = app.query_one("#topic-view", TopicView)
-        view.set_topic(app.document.topics[7])
+        view.set_topic(topic)
         await pilot.pause()
 
         assert not any("AL(" in placeholder for placeholder in view.image_placeholders)

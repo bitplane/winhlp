@@ -8,8 +8,12 @@ came back empty and no text was extracted even though parsing "succeeded".
 
 import os
 import re
+import struct
+
 import pytest
+from winhlp.lib.compression import hall_decompress
 from winhlp.lib.hlp import HelpFile
+from winhlp.lib.internal_files.phrindex import PhrIndexFile
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 
@@ -61,11 +65,15 @@ def test_lz77_topic_content(path, n_topics, snippet):
 
 def test_hall_bitcount_zero_preserves_dbcs_phrase_boundaries():
     """CP932 phrases may split multibyte characters and must remain bytes."""
-    hlp = HelpFile(filepath=os.path.join(DATA, "coverage", "acmsetup.hlp"))
+    # Two one-byte phrases contain the two halves of CP932 "あ". With
+    # BitCount=0, each unary phrase length is encoded by one clear bit.
+    header = struct.pack("<llllllHH", 1, 2, 4, 2, 2, 0, 0, 0x4A00)
+    phrindex = PhrIndexFile(filename="|PhrIndex", raw_data=header + b"\x00\x00\x00\x00")
+    phrindex._parse_hall_phrase_offsets(b"\x82\xa0")
 
-    assert hlp.phrindex.header.bits == 0
-    assert sum(map(len, hlp.phrindex.phrase_bytes)) == hlp.phrindex.header.phr_image_size
-    assert "必要なファイルだけを選択してセットアップする" in hlp.get_topics()[11].get_plain_text()
+    assert phrindex.header.bits == 0
+    assert phrindex.phrase_bytes == [b"\x82", b"\xa0"]
+    assert hall_decompress(b"\x00\x02", phrindex.phrase_bytes).decode("cp932") == "あ"
 
 
 def test_zero_width_macro_button_is_retained_as_embedded_object():
