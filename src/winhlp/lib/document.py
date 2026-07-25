@@ -25,6 +25,7 @@ class ResolvedTarget:
     original: str
     topic: Optional[ParsedTopic] = None
     detail: Optional[str] = None
+    open_as_popup: bool = False
 
     @property
     def navigable(self) -> bool:
@@ -39,6 +40,13 @@ class EmbeddedResource:
     alignment: str
     reference: str
     resource_name: str
+
+
+@dataclass(frozen=True)
+class NavigationEntry:
+    label: str
+    topic: Optional[ParsedTopic]
+    level: int = 0
 
 
 def parse_embedded_resource(marker: str) -> Optional[EmbeddedResource]:
@@ -121,6 +129,39 @@ class HelpDocument:
             return list(self.topics)
         return [topic for topic in self.topics if all(term in self._search_text[id(topic)] for term in terms)]
 
+    def contents_entries(self) -> list[NavigationEntry]:
+        catalog = getattr(self.helpfile, "catalog", None)
+        if catalog and catalog.topic_offsets:
+            topics = [self.topic_for_offset(offset) for offset in catalog.topic_offsets]
+            return [
+                NavigationEntry(topic.title or f"Topic {index + 1}", topic)
+                for index, topic in enumerate(topics)
+                if topic is not None
+            ]
+        cnttext = getattr(self.helpfile, "cnttext", None)
+        if cnttext and cnttext.topic_titles:
+            jumps = getattr(getattr(self.helpfile, "cntjump", None), "jump_references", [])
+            entries = []
+            for index, title in enumerate(cnttext.topic_titles):
+                reference = str(jumps[index]) if index < len(jumps) else ""
+                topic = self.topic_by_context_name(reference) or self.topic_by_context_name(title)
+                level = (len(title) - len(title.lstrip("\t"))) + (len(title) - len(title.lstrip(" "))) // 2
+                entries.append(NavigationEntry(title.lstrip(), topic, level))
+            return entries
+        return [NavigationEntry(topic.title or f"Topic {index + 1}", topic) for index, topic in enumerate(self.topics)]
+
+    def index_entries(self) -> list[NavigationEntry]:
+        entries = []
+        seen = set()
+        for topic in self.topics:
+            for keyword in topic.keywords:
+                folded = keyword.casefold()
+                key = (folded, id(topic))
+                if key not in seen:
+                    seen.add(key)
+                    entries.append(NavigationEntry(keyword, topic))
+        return sorted(entries, key=lambda entry: entry.label.casefold())
+
     def browse_previous(self, topic: ParsedTopic) -> Optional[ParsedTopic]:
         return self.topic_by_number(topic.browse_prev_topic) if topic.browse_prev_topic is not None else None
 
@@ -135,9 +176,20 @@ class HelpDocument:
                 "external",
                 hotspot.target,
                 detail=f"External WinHelp target is not supported: {hotspot.target}",
+                open_as_popup=hotspot.hotspot_type == "external_popup",
             )
         prefix = "popup" if hotspot.hotspot_type == "popup" else "topic"
         return self.resolve_target(f"{prefix}:{hotspot.target}")
+
+    def resolve_context_hash(self, hash_value: int, popup: bool = False) -> ResolvedTarget:
+        """Resolve a bitmap hotspot context hash."""
+        offset = self._context_offset(hash_value)
+        topic = self.topic_for_offset(offset)
+        kind = "popup" if popup else "topic"
+        original = f"{kind}:{hash_value & 0xFFFFFFFF:08X}"
+        if topic is None:
+            return ResolvedTarget("unresolved", original, detail=f"Could not resolve bitmap hotspot {original}")
+        return ResolvedTarget(kind, original, topic=topic)
 
     def resolve_target(self, target: Optional[str]) -> ResolvedTarget:
         original = target or ""
