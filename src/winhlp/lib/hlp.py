@@ -649,7 +649,7 @@ class HelpFile(BaseModel):
 
         reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
         ttlbtree_data = self.data[ttlbtree_offset : ttlbtree_offset + 9 + used_space]
-        return TTLBTreeFile(filename="|TTLBTREE", raw_data=ttlbtree_data)
+        return TTLBTreeFile(filename="|TTLBTREE", raw_data=ttlbtree_data, system_file=self.system)
 
     def _parse_bitmaps(self) -> Dict[str, BitmapFile]:
         """
@@ -734,7 +734,7 @@ class HelpFile(BaseModel):
             reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
             btree_data = self.data[btree_offset : btree_offset + 9 + used_space]
-            btree_file = XWBTreeFile(filename=btree_name, raw_data=btree_data)
+            btree_file = XWBTreeFile(filename=btree_name, raw_data=btree_data, system_file=self.system)
 
             # Parse |xWDATA file
             data_offset = self.directory.files[data_name]
@@ -926,7 +926,7 @@ class HelpFile(BaseModel):
             reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
 
             btree_data = self.data[btree_offset : btree_offset + 9 + used_space]
-            btree_file = XWBTreeFile(filename=btree_name, raw_data=btree_data)
+            btree_file = XWBTreeFile(filename=btree_name, raw_data=btree_data, system_file=self.system)
 
             # Parse |xKWDATA file
             data_offset = self.directory.files[data_name]

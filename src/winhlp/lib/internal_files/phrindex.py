@@ -1,6 +1,7 @@
 """Parser for the |PhrIndex internal file."""
 
 from .base import InternalFile
+from ..text_utils import decode_help_text_with_system
 from pydantic import BaseModel
 from typing import Any
 import struct
@@ -215,8 +216,7 @@ class PhrIndexFile(InternalFile):
                 continue
 
             phrase_bytes = phrase_data[start_offset:end_offset]
-            # Decode using latin-1 as per helldeco.c which treats bytes as chars
-            phrase = phrase_bytes.decode("latin-1", errors="replace")
+            phrase = decode_help_text_with_system(phrase_bytes, self.system_file)
             self.phrases.append(phrase)
 
     def _init_getbit(self):

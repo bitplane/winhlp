@@ -2,9 +2,9 @@
 
 from .base import InternalFile
 from ..btree import BTree
-from ..text_utils import decode_help_text
+from ..text_utils import decode_help_text_with_system
 from pydantic import BaseModel
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List
 import struct
 
 
@@ -57,9 +57,11 @@ class TTLBTreeFile(InternalFile):
     topic_title_map: Dict[int, str] = {}  # topic_offset -> topic_title
     title_topic_map: Dict[str, int] = {}  # topic_title -> topic_offset
     entries: List[TTLBTreeLeafEntry] = []
+    system_file: Any = None
 
-    def __init__(self, **data):
+    def __init__(self, system_file=None, **data):
         super().__init__(**data)
+        self.system_file = system_file
         self.topic_title_map = {}
         self.title_topic_map = {}
         self.entries = []
@@ -109,7 +111,7 @@ class TTLBTreeFile(InternalFile):
                     title_end = len(page)
 
                 title_bytes = page[title_start:title_end]
-                topic_title = decode_help_text(title_bytes)
+                topic_title = decode_help_text_with_system(title_bytes, self.system_file)
 
                 # Move past the null terminator (if found)
                 offset = title_end + (1 if title_end < len(page) else 0)

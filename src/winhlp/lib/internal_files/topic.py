@@ -1185,14 +1185,14 @@ class TopicFile(InternalFile):
                 from ..compression import phrase_decompress
 
                 phrases = hlp_file.phrase.phrases if hlp_file.phrase else []
-                return phrase_decompress(data, phrases)
+                return phrase_decompress(data, phrases, self.system_file.encoding)
 
             elif "|PhrIndex" in hlp_file.directory.files and "|PhrImage" in hlp_file.directory.files:
                 # Hall compression
                 from ..compression import hall_decompress
 
                 phrases = hlp_file.phrindex.phrases if hlp_file.phrindex else []
-                return hall_decompress(data, phrases)
+                return hall_decompress(data, phrases, self.system_file.encoding)
 
         # Fallback: no phrase compression - data is stored uncompressed
         return data[:data_len2]

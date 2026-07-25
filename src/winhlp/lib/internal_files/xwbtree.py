@@ -2,8 +2,9 @@
 
 from .base import InternalFile
 from ..btree import BTree
+from ..text_utils import decode_help_text_with_system
 from pydantic import BaseModel
-from typing import Optional, Dict, List, Union
+from typing import Any, Optional, Dict, List, Union
 import struct
 
 
@@ -79,9 +80,11 @@ class XWBTreeFile(InternalFile):
     keyword_map: Dict[str, Union[XWBTreeLeafEntry, XWBTreeGIDLeafEntry]] = {}
     entries: List[Union[XWBTreeLeafEntry, XWBTreeGIDLeafEntry]] = []
     is_gid_format: bool = False
+    system_file: Any = None
 
-    def __init__(self, **data):
+    def __init__(self, system_file=None, **data):
         super().__init__(**data)
+        self.system_file = system_file
         self.keyword_map = {}
         self.entries = []
         self.is_gid_format = False
@@ -221,17 +224,7 @@ class XWBTreeFile(InternalFile):
         if not data:
             return ""
 
-        # Try common Windows encodings
-        encodings = ["cp1252", "cp1251", "utf-8", "latin-1"]
-
-        for encoding in encodings:
-            try:
-                return data.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-
-        # Final fallback: decode with errors='replace' to avoid crashes
-        return data.decode("cp1252", errors="replace")
+        return decode_help_text_with_system(data, self.system_file)
 
     def get_keyword_info(self, keyword: str) -> Optional[Union[XWBTreeLeafEntry, XWBTreeGIDLeafEntry]]:
         """

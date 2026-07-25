@@ -173,12 +173,20 @@ class SystemFile(InternalFile):
         }
         SYSTEMREC[]
         """
-        offset = 12  # Start after the header
-        while offset + 4 <= len(self.raw_data):
-            record_type, data_size = struct.unpack_from("<HH", self.raw_data, offset)
-            offset += 4
-            record_data = self.raw_data[offset : offset + data_size]
+        records = list(self._iter_records())
 
+        # Text records (including TITLE) commonly precede the locale metadata.
+        # Select the code page first so every record is decoded consistently.
+        for record_type, record_data in records:
+            if record_type == 9 and not self.is_mvp and len(record_data) >= 10:
+                self.lcid = struct.unpack_from("<H", record_data, 8)[0]
+                self._update_encoding_from_lcid(self.lcid)
+        for record_type, record_data in records:
+            if record_type == 11 and not self.is_mvp and len(record_data) >= 2:
+                self.charset = struct.unpack_from("<H", record_data, 0)[0]
+                self._update_encoding_from_charset(self.charset)
+
+        for record_type, record_data in records:
             if record_type == 1:  # TITLE
                 self.title = self._decode_text(record_data.split(b"\x00")[0])
             elif record_type == 2:  # COPYRIGHT
@@ -211,8 +219,15 @@ class SystemFile(InternalFile):
                 self._parse_dllmaps(record_data)
             else:
                 # For unknown record types, just store the raw data
-                self.records.append({"type": record_type, "size": data_size, "data": record_data})
+                self.records.append({"type": record_type, "size": len(record_data), "data": record_data})
 
+    def _iter_records(self):
+        """Yield raw SYSTEM records without decoding their contents."""
+        offset = 12
+        while offset + 4 <= len(self.raw_data):
+            record_type, data_size = struct.unpack_from("<HH", self.raw_data, offset)
+            offset += 4
+            yield record_type, self.raw_data[offset : offset + data_size]
             offset += data_size
 
     def _parse_key_index(self, data: bytes):
@@ -345,37 +360,6 @@ class SystemFile(InternalFile):
         self.records.append(
             {"type": "CITATION", "citation_text": citation_text, "raw_data": {"raw": data, "parsed": parsed_record}}
         )
-
-    def _parse_lcid(self, data: bytes):
-        """Parses a LCID (Locale ID) record (record type 9)."""
-        if len(data) >= 10:
-            lcid1 = struct.unpack("<h", data[8:10])[0] if len(data) >= 10 else 0
-            lcid2 = struct.unpack("<h", data[0:2])[0] if len(data) >= 2 else 0
-            lcid3 = struct.unpack("<h", data[2:4])[0] if len(data) >= 4 else 0
-
-            self.lcid = lcid1  # Primary locale ID
-
-            # Update encoding based on LCID
-            self._update_encoding_from_lcid(lcid1)
-
-            parsed_record = {"lcid1": lcid1, "lcid2": lcid2, "lcid3": lcid3}
-            self.records.append(
-                {"type": "LCID", "lcids": [lcid1, lcid2, lcid3], "raw_data": {"raw": data, "parsed": parsed_record}}
-            )
-
-    def _parse_charset(self, data: bytes):
-        """Parses a CHARSET record (record type 11)."""
-        if len(data) >= 2:
-            charset = struct.unpack("<H", data[:2])[0]
-            self.charset = charset
-
-            # Update encoding based on charset
-            self._update_encoding_from_charset(charset)
-
-            parsed_record = {"charset": charset}
-            self.records.append(
-                {"type": "CHARSET", "charset": charset, "raw_data": {"raw": data, "parsed": parsed_record}}
-            )
 
     def _update_encoding_from_lcid(self, lcid: int):
         """Update encoding based on Windows LCID."""
@@ -669,13 +653,15 @@ class SystemFile(InternalFile):
     def _parse_charset(self, data: bytes):
         """
         Parses a CHARSET record (record type 11).
-        From C code: if(!mvp) printf("CHARSET=%d\n",*(unsigned char *)(SysRec->Data+1));
+        CHARSET is an unsigned short in HCW 4.00 files.
         """
-        if not self.is_mvp and len(data) > 1:
-            charset_id = data[1] if len(data) > 1 else 0
-            parsed_record = {"charset_id": charset_id}
+        if not self.is_mvp and len(data) >= 2:
+            charset = struct.unpack_from("<H", data, 0)[0]
+            self.charset = charset
+            self._update_encoding_from_charset(charset)
+            parsed_record = {"charset": charset}
             self.records.append(
-                {"type": "CHARSET", "charset_id": charset_id, "raw_data": {"raw": data, "parsed": parsed_record}}
+                {"type": "CHARSET", "charset": charset, "raw_data": {"raw": data, "parsed": parsed_record}}
             )
 
     def _parse_key_index(self, data: bytes):
@@ -749,9 +735,11 @@ class SystemFile(InternalFile):
         if not self.is_mvp and len(data) >= 10:
             # Extract three 16-bit values from specific offsets
             try:
-                lcid1 = struct.unpack_from("<H", data, 0)[0] if len(data) >= 2 else 0
-                lcid2 = struct.unpack_from("<H", data, 2)[0] if len(data) >= 4 else 0
-                lcid3 = struct.unpack_from("<H", data, 8)[0] if len(data) >= 10 else 0
+                lcid1 = struct.unpack_from("<H", data, 8)[0]
+                lcid2 = struct.unpack_from("<H", data, 0)[0]
+                lcid3 = struct.unpack_from("<H", data, 2)[0]
+                self.lcid = lcid1
+                self._update_encoding_from_lcid(lcid1)
 
                 parsed_record = {
                     "lcid1": lcid1,
