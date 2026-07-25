@@ -9,6 +9,7 @@ from .directory import Directory
 from .btree import BTree
 from .compression import lz77_decompress, phrase_decompress, hall_decompress
 from .exceptions import HLPError, InvalidHLPFileError, BTreeError
+from .document import HelpDocument, HelpNavigator, ResolvedTarget
 
 __all__ = [
     "HelpFile",
@@ -20,4 +21,7 @@ __all__ = [
     "HLPError",
     "InvalidHLPFileError",
     "BTreeError",
+    "HelpDocument",
+    "HelpNavigator",
+    "ResolvedTarget",
 ]

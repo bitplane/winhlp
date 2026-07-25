@@ -61,3 +61,10 @@ def test_html_images_are_png_when_pillow_available():
     out = export_html(hlp, images="embed")
     assert "data:image/png;base64," in out
     assert "data:image/bmp;base64," not in out
+
+
+def test_html_context_hash_links_use_shared_document_resolution():
+    hlp = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP"))
+    out = export_html(hlp)
+
+    assert '<a class="jump" href="#topic-1">' in out

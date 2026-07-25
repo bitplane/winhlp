@@ -14,6 +14,9 @@ import os
 import re
 from typing import Optional
 
+from .document import parse_embedded_resource
+from .internal_files.topic import TopicTableBlock, TopicTextBlock
+
 try:
     from PIL import Image
 
@@ -47,24 +50,15 @@ def _to_png(data: bytes, ext: str) -> tuple:
 _IMG_STYLE = {"left": ' style="float:left;margin:0 1em 0.5em 0"', "right": ' style="float:right;margin:0 0 0.5em 1em"'}
 
 
-def _ewc_filename(ewc: str) -> str:
-    """Pull the resource filename out of an ewc "DLL, Class, [!]Param" string.
-
-    MediaView bitmap DLLs (e.g. MVBMP2) name the actual bitmap in the last field,
-    often prefixed with '!' — e.g. "MVBMP2, ViewerBmp2, !cvr_nec5.shg".
-    """
-    last = ewc.split(",")[-1].strip()
-    return last.lstrip("!").strip()
-
-
 class HtmlExporter:
     def __init__(self, helpfile, images: str = "embed", image_dir: Optional[str] = None):
         """images: "embed" (data URIs) or "extract" (write files to image_dir)."""
         self.hlp = helpfile
         self.images = images
         self.image_dir = image_dir
+        self.document = helpfile.get_document()
         self._font = getattr(helpfile, "font", None)
-        self._offset_to_anchor: dict = {}
+        self._topic_to_anchor: dict = {}
         self._font_class: dict = {}  # font_number -> css class name
         self._css_rules: dict = {}  # class name -> css body
         self._image_cache: dict = {}  # picture number -> <img> src or None
@@ -72,11 +66,10 @@ class HtmlExporter:
     # -- public ------------------------------------------------------------
 
     def export(self) -> str:
-        topics = self.hlp.topic.get_all_topics() if self.hlp.topic else []
+        topics = self.document.topics
         for i, t in enumerate(topics):
             anchor = self._anchor(t, i)
-            if t.topic_offset is not None:
-                self._offset_to_anchor.setdefault(t.topic_offset, anchor)
+            self._topic_to_anchor[id(t)] = anchor
 
         sections = [self._render_topic(t, i, self._anchor(t, i)) for i, t in enumerate(topics)]
         toc = self._render_toc(topics)
@@ -144,20 +137,27 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         if meta:
             parts.append(f'<p class="topic-meta">{" &middot; ".join(meta)}</p>')
 
-        parts.append(self._render_spans(topic))
-        for table in topic.tables:
-            parts.append(self._render_table(table))
+        if topic.content_blocks:
+            for block in topic.content_blocks:
+                if isinstance(block, TopicTextBlock):
+                    parts.append(self._render_spans(block.text_spans))
+                elif isinstance(block, TopicTableBlock):
+                    parts.append(self._render_table(block.table))
+        else:
+            parts.append(self._render_spans(topic.text_spans))
+            for table in topic.tables:
+                parts.append(self._render_table(table))
         parts.append("</section>")
         return "\n".join(p for p in parts if p)
 
-    def _render_spans(self, topic) -> str:
+    def _render_spans(self, spans) -> str:
         """Turn the topic's flat text_spans into <p> paragraphs of styled runs.
 
         Span text carries the paragraph structure the interleaved parser emitted:
         "\\n\\n" between paragraphs, "\\n" a line break, "\\t" a tab.
         """
         paragraphs = [[]]  # list of paragraphs; each a list of html run strings
-        for span in topic.text_spans:
+        for span in spans:
             text = span.text or ""
             # Split into paragraph chunks, keeping run formatting per chunk.
             chunks = text.split("\n\n")
@@ -192,32 +192,18 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
     # -- hyperlinks --------------------------------------------------------
 
     def _render_hyperlink(self, target: str, inner: str) -> str:
-        if target.startswith(("topic:", "popup:")):
-            kind, _, ref = target.partition(":")
-            anchor = self._resolve_offset_ref(ref)
-            cls = "popup" if kind == "popup" else "jump"
+        resolved = self.document.resolve_target(target)
+        if resolved.kind in ("topic", "popup"):
+            anchor = self._topic_to_anchor.get(id(resolved.topic)) if resolved.topic is not None else None
+            cls = "popup" if resolved.kind == "popup" else "jump"
             if anchor:
                 return f'<a class="{cls}" href="#{anchor}">{inner}</a>'
             # unresolved jump: keep it visibly a link but inert
             return f'<a class="{cls}" title="{html.escape(target)}">{inner}</a>'
-        if target.startswith("macro:"):
-            macro = html.escape(target[len("macro:") :])
+        if resolved.kind == "macro":
+            macro = html.escape(resolved.detail or target)
             return f'<a class="macro" title="{macro}">{inner}</a>'
-        return f'<a title="{html.escape(target)}">{inner}</a>'
-
-    def _resolve_offset_ref(self, ref: str) -> Optional[str]:
-        # ref is either an 8-hex TOPICOFFSET or "TOPIC<n>" (HC30).
-        try:
-            offset = int(ref, 16) if all(c in "0123456789ABCDEFabcdef" for c in ref) else None
-        except ValueError:
-            offset = None
-        if offset is None:
-            return None
-        if offset in self._offset_to_anchor:
-            return self._offset_to_anchor[offset]
-        # nearest topic at or before this offset (topic covers a range)
-        below = [o for o in self._offset_to_anchor if o <= offset]
-        return self._offset_to_anchor[max(below)] if below else None
+        return f'<a title="{html.escape(resolved.detail or target)}">{inner}</a>'
 
     # -- fonts / css -------------------------------------------------------
 
@@ -296,22 +282,22 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
     # -- images ------------------------------------------------------------
 
     def _render_image(self, marker: str) -> str:
-        parts = marker.split(":", 2)
-        if len(parts) < 3:
+        resource = parse_embedded_resource(marker)
+        if resource is None:
             return ""  # no resource reference to resolve
-        kind, align, ref = parts[0], parts[1], parts[2]
 
         bitmaps = getattr(self.hlp, "bitmaps", {}) or {}
-        if kind == "bitmap" and ref.isdigit():
+        if resource.kind == "bitmap" and resource.reference.isdigit():
+            ref = resource.reference
             key = f"|bm{ref}" if f"|bm{ref}" in bitmaps else f"bm{ref}"
             alt = f"bitmap {ref}"
         else:  # window: extract the filename from "DLL, Class, [!]Param"
-            key = _ewc_filename(ref)
+            key = resource.resource_name
             alt = key or ""
         src = self._image_src(bitmaps.get(key), key)
         if not src:
             return ""
-        style = _IMG_STYLE.get(align, "")  # inline -> no float
+        style = _IMG_STYLE.get(resource.alignment, "")  # inline -> no float
         return f'<img{style} src="{src}" alt="{html.escape(alt)}">'
 
     def _image_src(self, bitmap_file, cache_key):

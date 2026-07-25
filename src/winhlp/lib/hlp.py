@@ -1,6 +1,6 @@
 """Main HLP file reader class."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 from typing import Optional, List, Dict, Any
 from .directory import Directory
 from .internal_files.system import SystemFile
@@ -98,6 +98,7 @@ class HelpFile(BaseModel):
 
     # Annotations loaded from a sibling .ANN sidecar file (if present).
     annotations: List[Dict[str, Any]] = []
+    _document: Any = PrivateAttr(default=None)
 
     def __init__(self, filepath: str, **data):
         super().__init__(filepath=filepath, **data)
@@ -122,24 +123,16 @@ class HelpFile(BaseModel):
         return None
 
     def get_topic_by_context_name(self, context_name: str) -> Optional[ParsedTopic]:
-        """Get a topic by its context name using hash lookup."""
-        if not self.context or not self.topic:
-            return None
+        """Get a topic by its context name using the shared document index."""
+        return self.get_document().topic_by_context_name(context_name)
 
-        # Calculate hash for the context name
-        hash_value = ContextFile.calculate_hash(context_name)
+    def get_document(self):
+        """Return the cached presentation-neutral document index."""
+        if self._document is None:
+            from .document import HelpDocument
 
-        # Get topic offset from context mapping
-        topic_offset = self.context.get_topic_offset_for_hash(hash_value)
-        if topic_offset is None:
-            return None
-
-        # Find the topic with this offset (simplified - would need proper topic offset resolution)
-        for topic in self.topic.get_all_topics():
-            if topic.topic_number is not None:  # Basic matching - needs improvement
-                return topic
-
-        return None
+            self._document = HelpDocument(self)
+        return self._document
 
     def extract_bitmap(self, bitmap_name: str) -> Optional[bytes]:
         """Extract a bitmap as BMP file data."""

@@ -2,7 +2,7 @@
 
 from .base import InternalFile
 from pydantic import BaseModel
-from typing import List, Any, Optional, Tuple
+from typing import List, Any, Literal, Optional, Tuple, Union
 import struct
 from ..compression import decompress
 import warnings
@@ -475,6 +475,25 @@ class HotspotMapping(BaseModel):
     raw_data: dict
 
 
+class TopicTextBlock(BaseModel):
+    """One display record, retained in its original position within a topic."""
+
+    kind: Literal["text"] = "text"
+    text_spans: List[TextSpan] = []
+    paragraph_info: Optional[ParagraphInfo] = None
+    hotspot_mappings: List[HotspotMapping] = []
+
+
+class TopicTableBlock(BaseModel):
+    """One table record, retained in its original position within a topic."""
+
+    kind: Literal["table"] = "table"
+    table: Table
+
+
+TopicContentBlock = Union[TopicTextBlock, TopicTableBlock]
+
+
 class ParsedTopic(BaseModel):
     """A fully parsed topic with structured content."""
 
@@ -483,6 +502,7 @@ class ParsedTopic(BaseModel):
     text_spans: List[TextSpan] = []
     tables: List[Table] = []
     hotspot_mappings: List[HotspotMapping] = []
+    content_blocks: List[TopicContentBlock] = []
     # paragraph_info is the FIRST paragraph's formatting (kept for compatibility);
     # paragraph_infos holds every display record's ParagraphInfo in order.
     paragraph_info: Optional[ParagraphInfo] = None
@@ -1671,9 +1691,27 @@ class TopicFile(InternalFile):
             self._start_new_topic(None)
 
         current_topic = self.parsed_topics[-1]
+        current_topic.content_blocks.append(
+            TopicTextBlock(
+                text_spans=text_spans,
+                paragraph_info=paragraph_info,
+                hotspot_mappings=hotspot_mappings or [],
+            )
+        )
+        span_base = len(current_topic.text_spans)
+        character_base = sum(len(span.text) for span in current_topic.text_spans)
         current_topic.text_spans.extend(text_spans)
         if hotspot_mappings:
-            current_topic.hotspot_mappings.extend(hotspot_mappings)
+            current_topic.hotspot_mappings.extend(
+                mapping.model_copy(
+                    update={
+                        "text_span_index": mapping.text_span_index + span_base,
+                        "start_position": mapping.start_position + character_base,
+                        "end_position": mapping.end_position + character_base,
+                    }
+                )
+                for mapping in hotspot_mappings
+            )
         if paragraph_info:
             current_topic.paragraph_infos.append(paragraph_info)
             if not current_topic.paragraph_info:
@@ -2180,6 +2218,7 @@ class TopicFile(InternalFile):
 
         current_topic = self.parsed_topics[-1]
         current_topic.tables.append(table)
+        current_topic.content_blocks.append(TopicTableBlock(table=table))
 
     def get_topic_by_number(self, topic_number: int) -> Optional[ParsedTopic]:
         """Get a parsed topic by its topic number."""

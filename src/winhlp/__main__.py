@@ -28,17 +28,23 @@ def strip_raw_data(obj):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Parse a Windows HLP/MVB file to JSON or HTML.")
+    parser = argparse.ArgumentParser(description="View or export a Windows HLP/MVB file.")
     parser.add_argument("hlp_filepath", help="Path to the HLP file.")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument(
+        "--json",
+        action="store_true",
+        help="Dump the parsed structure as JSON instead of opening the terminal viewer.",
+    )
     parser.add_argument(
         "--raw",
         action="store_true",
-        help="Include raw_data byte blobs (base64) for full byte-level fidelity.",
+        help="Include raw_data byte blobs in JSON (implies --json).",
     )
-    parser.add_argument(
+    output.add_argument(
         "--html",
         metavar="OUT.html",
-        help="Render the whole help file to a single HTML file instead of JSON.",
+        help="Render the whole help file to a single HTML file.",
     )
     parser.add_argument(
         "--images",
@@ -47,9 +53,13 @@ def main():
         help="--html only: embed images as data URIs (default) or extract them to a folder.",
     )
     args = parser.parse_args()
+    if args.raw and args.html:
+        parser.error("--raw cannot be used with --html")
+    if args.raw:
+        args.json = True
 
     if not os.path.exists(args.hlp_filepath):
-        print(f"Error: File not found at {args.hlp_filepath}")
+        print(f"Error: File not found at {args.hlp_filepath}", file=sys.stderr)
         return 1
 
     try:
@@ -63,13 +73,19 @@ def main():
                 fh.write(html_out)
             print(f"Wrote {args.html} ({len(html_out):,} bytes)")
             return 0
-        data = hlp_file.model_dump()
-        if not args.raw:
-            data = strip_raw_data(data)
-        print(json.dumps(data, indent=2, cls=BytesEncoder))
+        if args.json:
+            data = hlp_file.model_dump()
+            if not args.raw:
+                data = strip_raw_data(data)
+            print(json.dumps(data, indent=2, cls=BytesEncoder))
+            return 0
+
+        from winhlp.tui import run_tui
+
+        run_tui(hlp_file)
         return 0
     except Exception as e:
-        print(f"Error parsing HLP file: {e}")
+        print(f"Error opening HLP file: {e}", file=sys.stderr)
         return 1
 
 

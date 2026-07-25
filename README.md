@@ -16,18 +16,24 @@ GPL licensed.
 ## Install
 
 ```sh
-pip install winhlp          # core (JSON)
+pip install winhlp          # parser + terminal viewer
 pip install winhlp[html]    # + Pillow, for PNG images in HTML export
 ```
 
 ## Command line
 
 ```sh
-winhlp file.hlp                        # dump the parsed structure as JSON
-winhlp file.hlp --raw                  # include raw byte blobs (base64)
+winhlp file.hlp                        # open the interactive terminal viewer
+winhlp file.hlp --json                 # dump the parsed structure as JSON
+winhlp file.hlp --raw                  # JSON including raw byte blobs (base64)
 winhlp file.hlp --html out.html        # render the whole file to one HTML page
 winhlp file.hlp --html out.html --images extract   # write images to out_images/
 ```
+
+The terminal viewer has a searchable topic sidebar, keyboard and mouse links,
+back/forward history, WinHelp browse-sequence navigation, popup topics, tables,
+and visible placeholders for embedded images. Press `/` to search, Tab/Shift-Tab
+to select links, Enter to follow one, and `q` to quit.
 
 The HTML export is a single self-contained page: a table of contents followed by
 every topic as an anchored section, with internal jumps/popups turned into
