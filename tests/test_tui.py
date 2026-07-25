@@ -3,6 +3,7 @@
 import os
 
 import pytest
+from rich.text import Text
 from winhlp.lib.hlp import HelpFile
 from winhlp.lib.internal_files.topic import TextSpan
 from winhlp.tui import DiagnosticPopup, InformationPopup, TopicPopup, TopicView, WinHlpApp, _span_style, _span_text
@@ -26,6 +27,17 @@ def test_terminal_font_approximations_preserve_semantics_without_source_colours(
     assert style.underline2
     assert style.bold
     assert style.color is None
+
+
+def test_subline_paragraph_spacing_does_not_become_a_full_terminal_row():
+    document = HelpFile(filepath=os.path.join(DATA, "win95", "WINDOWS.HLP")).get_document()
+    topic = document.topics[164]
+    view = TopicView(document, topic)
+
+    rendered = view._apply_paragraph_layout(Text("heading"), topic.content_blocks[0])
+
+    assert isinstance(rendered, Text)
+    assert not rendered.plain.startswith("\n")
 
 
 @pytest.mark.asyncio
@@ -90,6 +102,19 @@ async def test_indexed_bitmap_resources_are_rendered_inline():
         view = app.query_one("#topic-view", TopicView)
         view.set_topic(app.document.topics[1])
         assert not view.image_placeholders
+
+
+@pytest.mark.asyncio
+async def test_mediaview_button_is_a_macro_target_not_an_image():
+    app = WinHlpApp(HelpFile(filepath=os.path.join(DATA, "coverage", "mplayer_1.hlp")))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        view = app.query_one("#topic-view", TopicView)
+        view.set_topic(app.document.topics[7])
+        await pilot.pause()
+
+        assert not any("AL(" in placeholder for placeholder in view.image_placeholders)
+        assert any(target.kind == "macro" and "AL(" in target.original for target in view.targets)
 
 
 @pytest.mark.asyncio

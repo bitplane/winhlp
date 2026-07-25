@@ -187,10 +187,15 @@ class TopicView(Static):
             text.append(_span_text(span), _span_style(span))
             end = len(text)
             target = None
+            resource = parse_embedded_resource(span.embedded_image) if span.embedded_image else None
             if span.hyperlink_target:
                 target = self.document.resolve_target(span.hyperlink_target)
             elif index in mappings:
                 target = self.document.resolve_hotspot(mappings[index])
+            elif resource is not None and resource.kind == "window" and resource.reference.startswith("!"):
+                _label, separator, macro = resource.reference[1:].partition(",")
+                if separator and macro:
+                    target = self.document.resolve_target(f"macro:{macro}")
             if target is not None and self.interactive and end > start:
                 link_index = len(self.targets)
                 self.targets.append(target)
@@ -205,16 +210,20 @@ class TopicView(Static):
                 pending = flush_text()
                 if pending is not None:
                     yield pending
-                resource = parse_embedded_resource(span.embedded_image)
                 if resource is not None:
-                    yield self._render_image(resource)
+                    if resource.kind == "window" and resource.reference.startswith("!"):
+                        if not span.text.strip() and target is not None:
+                            yield self._render_object_button(target)
+                    elif resource.kind == "window" and resource.reference.startswith("*"):
+                        yield Text(f"[media: {resource.reference[1:]}]", style="italic dim")
+                    else:
+                        yield self._render_image(resource, target)
                 last_image_marker = span.embedded_image
             elif not span.embedded_image:
                 last_image_marker = None
         pending = flush_text()
         if pending is not None:
             yield pending
-        yield Text()
 
     def _apply_paragraph_layout(self, text: Text, block: TopicTextBlock) -> RenderableType:
         paragraph = block.paragraph_info
@@ -230,8 +239,12 @@ class TopicView(Static):
         if paragraph.tab_info and paragraph.tab_info.tabs:
             first_stop = max(2, min(16, paragraph.tab_info.tabs[0].position // 120))
             text.expand_tabs(first_stop)
-        above = 1 if paragraph.spacing_above else 0
-        below = 1 if paragraph.spacing_below else 0
+        # Old WinHelp paragraph values are commonly tenths of a twip-scaled
+        # unit (e.g. 12 becomes roughly 6pt). Do not round every positive value
+        # up to a whole terminal row; accumulate only approximately line-sized
+        # spacing.
+        above = max(0, (paragraph.spacing_above or 0) // 24)
+        below = max(0, (paragraph.spacing_below or 0) // 24)
         if above:
             text = Text("\n" * above) + text
         if below:
@@ -243,7 +256,19 @@ class TopicView(Static):
             return Panel(text, box=box.DOUBLE if border.border_double else box.SQUARE, padding=(0, 1))
         return text
 
-    def _render_image(self, resource) -> RenderableType:
+    def _render_object_button(self, target: ResolvedTarget) -> Text:
+        link_index = len(self.targets)
+        self.targets.append(target)
+        return Text(
+            "▣",
+            Style(
+                underline=True,
+                reverse=link_index == self.selected_link,
+                meta={"@click": f"{self.action_namespace}.follow_link({link_index})"},
+            ),
+        )
+
+    def _render_image(self, resource, object_target: Optional[ResolvedTarget] = None) -> RenderableType:
         label = resource.resource_name or resource.reference
         bitmaps = self.document.helpfile.bitmaps
         key = label
@@ -263,12 +288,19 @@ class TopicView(Static):
         raster_hotspots = []
         labels = Text()
         selected_raster_hotspot = -1
+        if object_target is not None:
+            link_index = len(self.targets)
+            self.targets.append(object_target)
+            action = f"{self.action_namespace}.follow_link({link_index})"
+            raster_hotspots.append(RasterHotspot(0, 0, image.width, image.height, action))
+            if link_index == self.selected_link:
+                selected_raster_hotspot = 0
         for hotspot_number, hotspot in enumerate(source_hotspots, start=1):
             target = self.document.resolve_context_hash(hotspot.hash_value)
             link_index = len(self.targets)
             self.targets.append(target)
             if link_index == self.selected_link:
-                selected_raster_hotspot = hotspot_number - 1
+                selected_raster_hotspot = len(raster_hotspots)
             action = f"{self.action_namespace}.follow_link({link_index})"
             raster_hotspots.append(RasterHotspot(hotspot.x, hotspot.y, hotspot.width, hotspot.height, action))
             start = len(labels)

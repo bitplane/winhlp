@@ -860,8 +860,6 @@ class TopicFile(InternalFile):
         This logic is based on the `DecompressIntoBuffer` function in `helpdec1.c`,
         which handles LZ77 decompression and variable block sizes.
         """
-        # Start at position 12 (after the first TOPICBLOCKHEADER)
-        topic_pos = 12
         self.topic_offset = 0
         offset = 0
         block_index = 0
@@ -918,19 +916,43 @@ class TopicFile(InternalFile):
             else:
                 block_data = block_data_raw
 
-            # Parse the actual TOPICLINK structures within the block
-            # Pass the current topic position within the file
-            self._parse_links(block_data, before31, topic_pos)
+            # TOPICLINK pointers use TOPICPOS coordinates, not physical offsets
+            # in |TOPIC. For WinHelp 3.1+ every physical block maps onto a
+            # virtual 16 KiB region, even when the stream itself is uncompressed.
+            # A block may begin with continuation bytes from a link that started
+            # in the previous block, so begin at the header's first complete
+            # TOPICLINK rather than blindly parsing block_data[0].
+            virtual_block_size = 2048 if before31 else 0x4000
+            topic_pos = block_index * virtual_block_size + 12
+            first_link_offset = first_topic_link - topic_pos
+            if 0 <= first_link_offset < len(block_data):
+                parse_data = block_data
+                next_physical_offset = offset + topic_block_size
+                if next_physical_offset + 12 <= len(self.raw_data):
+                    next_header = self.raw_data[next_physical_offset : next_physical_offset + 12]
+                    _next_last, next_first_link, _next_topic_header = struct.unpack("<lll", next_header)
+                    next_topic_pos = (block_index + 1) * virtual_block_size + 12
+                    continuation_size = next_first_link - next_topic_pos
+                    if continuation_size > 0:
+                        next_raw = self.raw_data[next_physical_offset + 12 : next_physical_offset + topic_block_size]
+                        next_data = decompress(method=2, data=next_raw) if is_lz_compressed else next_raw
+                        parse_data += next_data[:continuation_size]
+                self._parse_links(parse_data, before31, topic_pos, first_link_offset)
 
             offset += topic_block_size
-            topic_pos = offset + 12  # Next block's topic position
             block_index += 1
 
-    def _parse_links(self, block_data: bytes, before31: bool = False, topic_pos: int = 0):
+    def _parse_links(
+        self,
+        block_data: bytes,
+        before31: bool = False,
+        topic_pos: int = 0,
+        first_link_offset: int = 0,
+    ):
         """
         Parses the topic links within a topic block.
         """
-        offset = 0
+        offset = first_link_offset
         while offset < len(block_data):
             # TOPICLINK structure is always 21 bytes regardless of version
             # The difference between Win 3.0 and 3.1+ is in field interpretation, not size
@@ -968,7 +990,12 @@ class TopicFile(InternalFile):
                 break
             if data_len2 > 1048576:  # Unreasonably large data_len2 (1MB limit)
                 break
-            if abs(next_block) > len(self.raw_data):  # Next block offset beyond file size
+            virtual_block_size = 2048 if before31 else 0x4000
+            physical_block_size = (
+                2048 if before31 or (self.system_file and self.system_file.header.flags == 8) else 4096
+            )
+            block_count = (len(self.raw_data) + physical_block_size - 1) // physical_block_size
+            if next_block > block_count * virtual_block_size:
                 break
 
             # Only process known record types, skip unknown ones (like C reference does)
@@ -1462,6 +1489,32 @@ class TopicFile(InternalFile):
                     break
                 current_text.append(c)
 
+        def append_embedded_object(marker: str):
+            """Retain a picture/window command even when no text follows it."""
+            attrs = self._font_attributes(current_font)
+            text_spans.append(
+                TextSpan(
+                    text="",
+                    font_number=current_font,
+                    is_bold=attrs.get("bold", fmt["bold"]),
+                    is_italic=attrs.get("italic", fmt["italic"]),
+                    is_underline=attrs.get("underline", fmt["underline"]),
+                    is_strikethrough=attrs.get("strikethrough", fmt["strikethrough"]),
+                    is_double_underline=attrs.get("double_underline", False),
+                    is_small_caps=attrs.get("small_caps", False),
+                    is_superscript=fmt["superscript"],
+                    is_subscript=fmt["subscript"],
+                    font_half_points=attrs.get("half_points"),
+                    facename=attrs.get("facename"),
+                    fg_rgb=attrs.get("fg_rgb"),
+                    bg_rgb=attrs.get("bg_rgb"),
+                    is_hyperlink=fmt["hyperlink"],
+                    hyperlink_target=fmt["hyperlink_target"],
+                    embedded_image=marker,
+                    raw_data={"type": "embedded_object", "span_index": len(text_spans)},
+                )
+            )
+
         # Guard against pathological/corrupt streams that fail to reach a 0xFF.
         max_iterations = n1 + n2 + 16
         iterations = 0
@@ -1512,12 +1565,12 @@ class TopicFile(InternalFile):
                 picture_size, p1 = self.scan_long(linkdata1, p1)
                 if x1 == 0x22:  # HC31: number of hotspots precedes the union
                     _num_hotspots, p1 = self.scan_word(linkdata1, p1)
-                fmt["embedded_image"] = f"{'window' if x1 == 0x05 else 'bitmap'}:{alignment}"
+                marker = f"{'window' if x1 == 0x05 else 'bitmap'}:{alignment}"
                 if x1 in (0x03, 0x22) and p1 + 4 <= n1:
                     picture_is_embedded = struct.unpack_from("<H", linkdata1, p1)[0]
                     if picture_is_embedded == 0:
                         picture_number = struct.unpack_from("<H", linkdata1, p1 + 2)[0]
-                        fmt["embedded_image"] += f":{picture_number}"
+                        marker += f":{picture_number}"
                 elif x1 == 0x05 and p1 + 6 < n1:
                     # Embedded window (ewc/ewl/ewr): union is 3 shorts then a
                     # STRINGZ "DLLName,WindowClass,Param" (helpdeco.c:3634). For
@@ -1527,7 +1580,8 @@ class TopicFile(InternalFile):
                         end = min(p1 + 6 + 255, n1)
                     embedded = self._decode_text(linkdata1[p1 + 6 : end])
                     if embedded:
-                        fmt["embedded_image"] += f":{embedded}"
+                        marker += f":{embedded}"
+                append_embedded_object(marker)
                 p1 += max(0, picture_size)  # skip the picture union
             elif command == 0x89:  # end of hotspot
                 flush_span()

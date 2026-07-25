@@ -43,7 +43,7 @@ def test_navigation_history_and_popup_resolution():
     popup = document.resolve_target("popup:193ADDD8")
     assert popup.kind == "popup"
     assert popup.topic is not None
-    assert popup.topic.title == "How to get support"
+    assert "Shareware is copyrighted software" in popup.topic.get_plain_text()
 
 
 def test_topic_content_blocks_preserve_table_position_and_legacy_lists():

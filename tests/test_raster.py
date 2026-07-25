@@ -44,6 +44,15 @@ def test_unsupported_or_truncated_bmp_returns_none():
     assert decode_bmp(_bmp_24()[:-2]) is None
 
 
+def test_pixels_are_not_reversed_when_no_hotspot_is_selected():
+    image = decode_bmp(_bmp_24())
+    rendered = HalfBlockRasterizer().render(image, max_width=2)
+
+    assert rendered.spans
+    assert all(not span.style.reverse for span in rendered.spans)
+    assert all(not span.style.bold for span in rendered.spans)
+
+
 def test_real_one_and_four_bit_help_bitmaps_decode():
     data = Path(__file__).parent / "data"
     fixtures = [

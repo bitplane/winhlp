@@ -47,10 +47,10 @@ def test_win30_topic_content(path, n_topics, snippet):
 @pytest.mark.parametrize(
     "path, n_topics, snippet",
     [
-        ("SMARTTOP.HLP", 4, "Welcome to SmartTop"),  # 3.1, |Phrases compression
-        ("win311/SOL.HLP", 5, "Solitaire is a card game that combines skill and luck"),
-        ("win95/MSNINT.HLP", 10, "To view a list of topics, click Help Topics"),  # 95, Hall
-        ("win95/WINDOWS.HLP", 24, "software available on the network for installation"),
+        ("SMARTTOP.HLP", 7, "Welcome to SmartTop"),  # 3.1, |Phrases compression
+        ("win311/SOL.HLP", 7, "Solitaire is a card game that combines skill and luck"),
+        ("win95/MSNINT.HLP", 102, "To view a list of topics, click Help Topics"),  # 95, Hall
+        ("win95/WINDOWS.HLP", 1550, "software available on the network for installation"),
     ],
 )
 def test_lz77_topic_content(path, n_topics, snippet):
@@ -66,6 +66,20 @@ def test_hall_bitcount_zero_preserves_dbcs_phrase_boundaries():
     assert hlp.phrindex.header.bits == 0
     assert sum(map(len, hlp.phrindex.phrase_bytes)) == hlp.phrindex.header.phr_image_size
     assert "必要なファイルだけを選択してセットアップする" in hlp.get_topics()[11].get_plain_text()
+
+
+def test_zero_width_macro_button_is_retained_as_embedded_object():
+    hlp = HelpFile(filepath=os.path.join(DATA, "win95", "WINDOWS.HLP"))
+    topic = hlp.get_topics()[164]
+
+    objects = [
+        span
+        for span in topic.text_spans
+        if span.raw_data.get("type") == "embedded_object" and span.embedded_image == "bitmap:inline:0"
+    ]
+    assert len(objects) == 1
+    assert objects[0].text == ""
+    assert objects[0].hyperlink_target == "macro:EF(`Desk.cpl',`Display,0')\x00"
 
 
 # Character formatting is resolved from the |FONT descriptor referenced by each
