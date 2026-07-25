@@ -194,7 +194,7 @@ RecordType  Data
 3 CONTENTS  TOPICOFFSET Contents       topic offset of starting topic
 4 CONFIG    STRINGZ Macro	       all macros executed on opening
 5 ICON	    Windows *.ICO file	       See WIN31WH on icon file format
-6 WINDOW    struct		       Windows defined in the HPJ-file
+6 WINDOW    struct		       Windows defined in the HPJ-file (90 bytes)
 	    {
 		struct
 		{
@@ -224,7 +224,7 @@ RecordType  Data
 		COLORREF RgbNsr        color of non scrollable region
 	    }
 	    Window
-6 WINDOW    typedef struct	       Viewer 2.0 Windows defined in MVP-file
+6 WINDOW    typedef struct	       Viewer 2.0 Windows defined in MVP-file (128 bytes)
 	    {
 		unsigned short Flags
 		char Type[10]		 /* type of window */
@@ -236,10 +236,13 @@ RecordType  Data
 		short Width		 /* width of window (0..1000) */
 		short Height		 /* height of window (0..1000) */
 		short Maximize		 /* maximize flag and window styles */
-		COLORREF Rgb1
-		char Unknown
-		COLORREG Rgb2
-		COLORREF Rgb3
+		unsigned char TopRgb[3]
+		unsigned char Unknown0
+		unsigned char Unknown[25]
+		unsigned char Rgb[3]
+		unsigned char Unknown1
+		unsigned char RgbNsr[3]
+		unsigned char Unknown2
 		short X2
 		short Y2
 		short Width2

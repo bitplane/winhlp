@@ -414,11 +414,12 @@ class SystemFile(InternalFile):
 
     def _parse_window(self, data: bytes):
         """Parses a WINDOW record (record type 6)."""
-        # Determine window type based on data size
-        # SECWINDOW = 89 bytes, MVBWINDOW = 90 bytes (has extra MoreFlags byte)
-        if len(data) == 89:
+        # Both structures are packed on disk. SECWINDOW is 90 bytes; the
+        # Multimedia Viewer extension adds MoreFlags and the trailing fields
+        # described by MVBWINDOW, bringing it to 128 bytes.
+        if len(data) == 90:
             self._parse_secwindow(data)
-        elif len(data) == 90:
+        elif len(data) == 128:
             self._parse_mvbwindow(data)
         else:
             # Unknown window format, store as raw data
@@ -434,25 +435,21 @@ class SystemFile(InternalFile):
         flags = struct.unpack_from("<H", data, offset)[0]
         offset += 2
 
-        type_str = data[offset : offset + 10].rstrip(b"\x00").decode("latin-1", errors="replace")
+        type_str = self._decode_text(data[offset : offset + 10].rstrip(b"\x00"))
         offset += 10
 
-        name = data[offset : offset + 9].rstrip(b"\x00").decode("latin-1", errors="replace")
+        name = self._decode_text(data[offset : offset + 9].rstrip(b"\x00"))
         offset += 9
 
-        caption = data[offset : offset + 51].rstrip(b"\x00").decode("latin-1", errors="replace")
+        caption = self._decode_text(data[offset : offset + 51].rstrip(b"\x00"))
         offset += 51
 
         x, y, width, height, maximize = struct.unpack_from("<hhhhh", data, offset)
         offset += 10
 
-        rgb, unknown1, rgb_nsr = struct.unpack_from("<LHL", data, offset)
-        offset += 10
-
-        unknown2 = 0
-        if flags & 0x800:
-            unknown2 = struct.unpack_from("<H", data, offset)[0]
-            offset += 2
+        # HelpDeCo describes these as RGB[3], padding, RGB[3], padding;
+        # WinHelp Workshop describes the same eight bytes as two COLORREFs.
+        rgb, rgb_nsr = struct.unpack_from("<II", data, offset)
 
         parsed_record = {
             "window_type": "SECWINDOW",
@@ -466,9 +463,7 @@ class SystemFile(InternalFile):
             "height": height,
             "maximize": maximize,
             "rgb": rgb,
-            "unknown1": unknown1,
             "rgb_nsr": rgb_nsr,
-            "unknown2": unknown2,
         }
 
         self.records.append(
@@ -477,11 +472,9 @@ class SystemFile(InternalFile):
 
     def _parse_mvbwindow(self, data: bytes):
         """Parse MVBWINDOW structure (Multimedia Viewer 2.0)."""
-        # MVBWINDOW structure is actually much larger (132 bytes) than what we typically see
-        # Most files seem to have truncated or different structures, so handle gracefully
         offset = 0
 
-        if len(data) < 73:  # Minimum required for basic fields
+        if len(data) < 128:
             # Store as unknown window format
             parsed_record = {"window_type": "unknown_mvb", "size": len(data)}
             self.records.append(
@@ -492,38 +485,29 @@ class SystemFile(InternalFile):
         flags = struct.unpack_from("<H", data, offset)[0]
         offset += 2
 
-        type_str = data[offset : offset + 10].rstrip(b"\x00").decode("latin-1", errors="replace")
+        type_str = self._decode_text(data[offset : offset + 10].rstrip(b"\x00"))
         offset += 10
 
-        name = data[offset : offset + 9].rstrip(b"\x00").decode("latin-1", errors="replace")
+        name = self._decode_text(data[offset : offset + 9].rstrip(b"\x00"))
         offset += 9
 
-        caption = data[offset : offset + 51].rstrip(b"\x00").decode("latin-1", errors="replace")
+        caption = self._decode_text(data[offset : offset + 51].rstrip(b"\x00"))
         offset += 51
 
-        more_flags = data[offset] if offset < len(data) else 0
+        more_flags = data[offset]
         offset += 1
 
-        # Parse remaining fields if available
-        x = y = width = height = maximize = 0
-        if offset + 10 <= len(data):
-            x, y, width, height, maximize = struct.unpack_from("<hhhhh", data, offset)
-            offset += 10
-
-        # Parse color fields if available (simplified - just extract what we can)
-        rgb = unknown1 = rgb_nsr = unknown2 = 0
-        if offset + 4 <= len(data):
-            rgb = struct.unpack_from("<L", data, offset)[0]
-            offset += 4
-        if offset + 2 <= len(data):
-            unknown1 = struct.unpack_from("<H", data, offset)[0]
-            offset += 2
-        if offset + 4 <= len(data):
-            rgb_nsr = struct.unpack_from("<L", data, offset)[0]
-            offset += 4
-        if offset + 2 <= len(data):
-            unknown2 = struct.unpack_from("<H", data, offset)[0]
-            offset += 2
+        x, y, width, height, maximize = struct.unpack_from("<hhhhh", data, offset)
+        offset += 10
+        top_rgb = struct.unpack_from("<I", data, offset)[0]
+        offset += 4
+        unknown = data[offset : offset + 25]
+        offset += 25
+        rgb = struct.unpack_from("<I", data, offset)[0]
+        offset += 4
+        rgb_nsr = struct.unpack_from("<I", data, offset)[0]
+        offset += 4
+        x2, y2, width2, height2, x3, y3 = struct.unpack_from("<hhhhhh", data, offset)
 
         parsed_record = {
             "window_type": "MVBWINDOW",
@@ -537,10 +521,16 @@ class SystemFile(InternalFile):
             "width": width,
             "height": height,
             "maximize": maximize,
+            "top_rgb": top_rgb,
+            "unknown": unknown,
             "rgb": rgb,
-            "unknown1": unknown1,
             "rgb_nsr": rgb_nsr,
-            "unknown2": unknown2,
+            "x2": x2,
+            "y2": y2,
+            "width2": width2,
+            "height2": height2,
+            "x3": x3,
+            "y3": y3,
         }
 
         self.records.append(
