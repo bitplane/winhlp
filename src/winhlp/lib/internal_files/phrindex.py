@@ -46,12 +46,14 @@ class PhrIndexFile(InternalFile):
 
     header: PhrIndexHeader = None
     phrases: list = []
+    phrase_bytes: list[bytes] = []
     system_file: Any = None
 
     def __init__(self, system_file: Any = None, **data):
         super().__init__(**data)
         self.system_file = system_file
         self.phrases = []
+        self.phrase_bytes = []
         self._parse()
 
     def _parse(self):
@@ -180,8 +182,10 @@ class PhrIndexFile(InternalFile):
             while self._get_bit():
                 n += 1 << self.header.bits
 
-            # if (GetBit(HelpFile)) n += 1;
-            if self._get_bit():
+            # The reference C unconditionally reads this bit, but it represents
+            # bit zero of the remainder. Real DBCS files use bits == 0, where no
+            # remainder bits exist; consuming one desynchronizes every offset.
+            if self.header.bits > 0 and self._get_bit():
                 n += 1
 
             # if (PhrIndexHdr.bits > 1) if (GetBit(HelpFile)) n += 2;
@@ -212,10 +216,12 @@ class PhrIndexFile(InternalFile):
             # Bounds check
             if start_offset >= len(phrase_data) or end_offset > len(phrase_data):
                 # Add empty phrase for consistency
+                self.phrase_bytes.append(b"")
                 self.phrases.append("")
                 continue
 
             phrase_bytes = phrase_data[start_offset:end_offset]
+            self.phrase_bytes.append(phrase_bytes)
             phrase = decode_help_text_with_system(phrase_bytes, self.system_file)
             self.phrases.append(phrase)
 

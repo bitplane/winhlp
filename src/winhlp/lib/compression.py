@@ -127,7 +127,7 @@ def phrase_decompress(data: bytes, phrases: List[str], encoding: str = "cp1252")
     return bytes(output)
 
 
-def hall_decompress(data: bytes, phrases: List[str], encoding: str = "cp1252") -> bytes:
+def hall_decompress(data: bytes, phrases: List[str | bytes], encoding: str = "cp1252") -> bytes:
     """
     Decompresses Hall-compressed data (Windows 95 HCW 4.00).
 
@@ -153,7 +153,7 @@ def hall_decompress(data: bytes, phrases: List[str], encoding: str = "cp1252") -
             phrase_num = ch // 2
             if 0 <= phrase_num < len(phrases):
                 phrase = phrases[phrase_num]
-                output.extend(phrase.encode(encoding, errors="replace"))
+                output.extend(phrase if isinstance(phrase, bytes) else phrase.encode(encoding, errors="replace"))
         elif ch & 0x03 == 0x01:
             # Least two bits are 01: phrases 128..16511.
             # helpdeco: CurChar = 128 + (CurChar/4)*256 + *str; PrintPhrase(CurChar)
@@ -164,7 +164,7 @@ def hall_decompress(data: bytes, phrases: List[str], encoding: str = "cp1252") -
             phrase_num = 128 + (ch // 4) * 256 + next_ch
             if 0 <= phrase_num < len(phrases):
                 phrase = phrases[phrase_num]
-                output.extend(phrase.encode(encoding, errors="replace"))
+                output.extend(phrase if isinstance(phrase, bytes) else phrase.encode(encoding, errors="replace"))
         elif ch & 0x07 == 0x03:
             # Least three bits are 011: copy literal characters
             count = ch // 8 + 1

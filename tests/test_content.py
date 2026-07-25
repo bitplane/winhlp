@@ -59,6 +59,15 @@ def test_lz77_topic_content(path, n_topics, snippet):
     assert snippet in _normalized_text(path)
 
 
+def test_hall_bitcount_zero_preserves_dbcs_phrase_boundaries():
+    """CP932 phrases may split multibyte characters and must remain bytes."""
+    hlp = HelpFile(filepath=os.path.join(DATA, "coverage", "acmsetup.hlp"))
+
+    assert hlp.phrindex.header.bits == 0
+    assert sum(map(len, hlp.phrindex.phrase_bytes)) == hlp.phrindex.header.phr_image_size
+    assert "必要なファイルだけを選択してセットアップする" in hlp.get_topics()[11].get_plain_text()
+
+
 # Character formatting is resolved from the |FONT descriptor referenced by each
 # span's font_number (bold/italic/underline/size/facename), not the command
 # stream. Guard that spans in 3.1/95 files carry resolved attributes.

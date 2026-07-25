@@ -1191,7 +1191,7 @@ class TopicFile(InternalFile):
                 # Hall compression
                 from ..compression import hall_decompress
 
-                phrases = hlp_file.phrindex.phrases if hlp_file.phrindex else []
+                phrases = hlp_file.phrindex.phrase_bytes if hlp_file.phrindex else []
                 return hall_decompress(data, phrases, self.system_file.encoding)
 
         # Fallback: no phrase compression - data is stored uncompressed
