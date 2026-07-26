@@ -74,6 +74,29 @@ def test_subline_paragraph_spacing_does_not_become_a_full_terminal_row():
 
 
 @pytest.mark.asyncio
+async def test_windows_topic_is_compact_inline_and_has_no_default_metadata():
+    helpfile = HelpFile(filepath=os.path.join(DATA, "win95", "WINDOWS.HLP"))
+    app = WinHlpApp(helpfile)
+    topic = next(topic for topic in app.document.topics if topic.title == "Creating a startup disk")
+    app.navigator.current = topic
+
+    async with app.run_test(size=(100, 35)) as pilot:
+        await pilot.pause()
+        fixed = app.query_one("#fixed-header", TopicView)
+        view = app.query_one("#topic-view", TopicView)
+        output = StringIO()
+        Console(file=output, width=100, color_system=None).print(view._Static__content)
+        rendered = output.getvalue()
+
+        assert not fixed.display
+        assert "id:" not in rendered
+        assert "keywords:" not in rendered
+        assert rendered.count("To create a startup disk") == 1
+        assert any("Click here" in line and "to open the Add/Remove" in line for line in rendered.splitlines())
+        assert "▪" in rendered
+
+
+@pytest.mark.asyncio
 async def test_link_keyboard_navigation_and_history():
     app = WinHlpApp(HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")))
 
@@ -198,6 +221,10 @@ async def test_external_navigation_rejects_missing_or_non_sibling_file():
 @pytest.mark.asyncio
 async def test_fixed_and_scrolling_regions_share_keyboard_target_order():
     app = WinHlpApp(HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")))
+    topic = app.navigator.current
+    assert topic is not None
+    boundary = topic.content_blocks[2].source_record_offset
+    topic.non_scroll_offset = boundary
 
     async with app.run_test(size=(100, 30)) as pilot:
         fixed = app.query_one("#fixed-header", TopicView)

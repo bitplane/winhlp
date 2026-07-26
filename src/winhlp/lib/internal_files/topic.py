@@ -489,6 +489,7 @@ class TopicTextBlock(BaseModel):
     hotspot_mappings: List[HotspotMapping] = []
     source_offset: Optional[int] = None
     source_end_offset: Optional[int] = None
+    source_record_offset: Optional[int] = None
 
 
 class TopicTableBlock(BaseModel):
@@ -498,6 +499,7 @@ class TopicTableBlock(BaseModel):
     table: Table
     source_offset: Optional[int] = None
     source_end_offset: Optional[int] = None
+    source_record_offset: Optional[int] = None
 
 
 TopicContentBlock = Union[TopicTextBlock, TopicTableBlock]
@@ -978,6 +980,7 @@ class TopicFile(InternalFile):
                 break
             _link_offset = 21
 
+            record_offset = topic_pos + offset
             parsed_link = {
                 "block_size": block_size,
                 "data_len2": data_len2,
@@ -985,6 +988,7 @@ class TopicFile(InternalFile):
                 "next_block": next_block,
                 "data_len1": data_len1,
                 "record_type": record_type,
+                "record_offset": record_offset,
             }
 
             # Validate the TopicLink structure (minimal validation like helpdeco.c)
@@ -1043,7 +1047,7 @@ class TopicFile(InternalFile):
             link_data1 = block_data[data1_start:data1_end] if linkdata1_size > 0 else b""
             link_data2 = block_data[data2_start:data2_end] if linkdata2_size > 0 else b""
 
-            self._parse_link_data(link, link_data1, link_data2, before31)
+            self._parse_link_data(link, link_data1, link_data2, before31, record_offset)
 
             if block_size == 0:
                 break
@@ -1073,7 +1077,14 @@ class TopicFile(InternalFile):
                     # Next link is in a different block, exit this block
                     break
 
-    def _parse_link_data(self, link: TopicLink, link_data1: bytes, link_data2: bytes, before31: bool = False):
+    def _parse_link_data(
+        self,
+        link: TopicLink,
+        link_data1: bytes,
+        link_data2: bytes,
+        before31: bool = False,
+        record_offset: Optional[int] = None,
+    ):
         """
         Parses the data within a topic link.
         """
@@ -1107,7 +1118,12 @@ class TopicFile(InternalFile):
                 self.remaining_linkdata1, link_data2, link.data_len2, link.block_size, link.data_len1
             )
             self._add_content_to_current_topic(
-                text_spans, paragraph_info, hotspot_mappings, source_offset, self.topic_offset
+                text_spans,
+                paragraph_info,
+                hotspot_mappings,
+                source_offset,
+                self.topic_offset,
+                record_offset,
             )
         elif link.record_type == 0x01:  # TL_DISPLAY30 (Windows 3.0)
             paragraph_info = self._parse_paragraph_info_30(link_data1)
@@ -1119,7 +1135,12 @@ class TopicFile(InternalFile):
             text_spans, hotspot_mappings = self._parse_text_content(
                 link_data2, link.data_len2, link.block_size, link.data_len1
             )
-            self._add_content_to_current_topic(text_spans, paragraph_info, hotspot_mappings)
+            self._add_content_to_current_topic(
+                text_spans,
+                paragraph_info,
+                hotspot_mappings,
+                source_record_offset=record_offset,
+            )
         elif link.record_type == 0x23:  # TL_TABLE
             paragraph_info = self._parse_paragraph_info(link_data1)
             source_offset = self.topic_offset
@@ -1133,7 +1154,7 @@ class TopicFile(InternalFile):
             )
             if table:
                 self.topic_offset += max(0, table.raw_data.get("topic_offset_increment", 0))
-                self._add_table_to_current_topic(table, source_offset, self.topic_offset)
+                self._add_table_to_current_topic(table, source_offset, self.topic_offset, record_offset)
         else:
             # Unknown record type. _parse_links only dispatches 0x01/0x02/0x20/0x23
             # so this is normally unreachable, but degrade gracefully rather than
@@ -1734,11 +1755,11 @@ class TopicFile(InternalFile):
 
     def _start_new_topic(self, topic_header, title=None, entry_macros=None):
         """Start parsing a new topic."""
-        # non_scroll is TopicHeader.scroll (start of scrolling region); text
-        # before it is the non-scrolling region (helpdeco.c:3286-3293).
-        non_scroll = getattr(topic_header, "scroll", None)
-        if non_scroll in (-1, 0xFFFFFFFF):
-            non_scroll = getattr(topic_header, "next_topic", None)
+        # NonScroll points at the first fixed record and Scroll at the first
+        # scrolling record. If NonScroll is absent, the topic has no fixed
+        # region at all; using Scroll unconditionally pins ordinary topics.
+        has_non_scroll = getattr(topic_header, "non_scroll", -1) not in (-1, 0xFFFFFFFF)
+        non_scroll = getattr(topic_header, "scroll", None) if has_non_scroll else None
         topic = ParsedTopic(
             topic_number=getattr(topic_header, "topic_num", None),
             title=title,
@@ -1759,6 +1780,7 @@ class TopicFile(InternalFile):
         hotspot_mappings: List[HotspotMapping] = None,
         source_offset: Optional[int] = None,
         source_end_offset: Optional[int] = None,
+        source_record_offset: Optional[int] = None,
     ):
         """Add content spans and hotspot mappings to the current topic."""
         if not self.parsed_topics:
@@ -1773,6 +1795,7 @@ class TopicFile(InternalFile):
                 hotspot_mappings=hotspot_mappings or [],
                 source_offset=source_offset,
                 source_end_offset=source_end_offset,
+                source_record_offset=source_record_offset,
             )
         )
         span_base = len(current_topic.text_spans)
@@ -2319,7 +2342,11 @@ class TopicFile(InternalFile):
         return [TextSpan(text=cell_text, raw_data={"type": "cell_text"})]
 
     def _add_table_to_current_topic(
-        self, table: Table, source_offset: Optional[int] = None, source_end_offset: Optional[int] = None
+        self,
+        table: Table,
+        source_offset: Optional[int] = None,
+        source_end_offset: Optional[int] = None,
+        source_record_offset: Optional[int] = None,
     ):
         """Add a table to the current topic."""
         if not self.parsed_topics:
@@ -2329,7 +2356,12 @@ class TopicFile(InternalFile):
         current_topic = self.parsed_topics[-1]
         current_topic.tables.append(table)
         current_topic.content_blocks.append(
-            TopicTableBlock(table=table, source_offset=source_offset, source_end_offset=source_end_offset)
+            TopicTableBlock(
+                table=table,
+                source_offset=source_offset,
+                source_end_offset=source_end_offset,
+                source_record_offset=source_record_offset,
+            )
         )
 
     def get_topic_by_number(self, topic_number: int) -> Optional[ParsedTopic]:

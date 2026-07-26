@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import locale
+import re
 import struct
 from datetime import datetime
 from pathlib import Path
@@ -37,7 +38,7 @@ from .lib.hlp import HelpFile
 from .lib.layout import layout_topic
 from .lib.internal_files.topic import ParsedTopic, TextSpan, TopicTableBlock, TopicTextBlock
 from .lib.raster import HalfBlockRasterizer, RasterHotspot, TerminalRasterizer, decode_bmp
-from .lib.terminal_layout import expand_terminal_tabs, translate_paragraph
+from .lib.terminal_layout import translate_paragraph
 
 
 WINHELP_THEME = Theme(
@@ -110,6 +111,50 @@ def _renderable_height(renderable: RenderableType) -> int:
     return 1
 
 
+def _expand_styled_tabs(text: Text, tabs, default_size: int = 4) -> Text:
+    """Expand tabs while retaining Rich spans, including click metadata."""
+    if "\t" not in text.plain:
+        return text
+    plain = text.plain
+    output: list[str] = []
+    positions = [0] * (len(plain) + 1)
+    column = 0
+    output_length = 0
+    for index, character in enumerate(plain):
+        positions[index] = output_length
+        if character == "\n":
+            output.append(character)
+            output_length += 1
+            column = 0
+            continue
+        if character != "\t":
+            output.append(character)
+            output_length += 1
+            column += 1
+            continue
+        following = plain[index + 1 :].split("\t", 1)[0].split("\n", 1)[0]
+        stop = next((tab for tab in tabs if tab.column > column), None)
+        if stop is None:
+            target = ((column // default_size) + 1) * default_size
+        elif stop.alignment == "right":
+            target = stop.column - len(following)
+        elif stop.alignment == "center":
+            target = stop.column - len(following) // 2
+        elif stop.alignment == "decimal":
+            target = stop.column - (following.find(".") if "." in following else len(following))
+        else:
+            target = stop.column
+        padding = max(1, target - column)
+        output.append(" " * padding)
+        output_length += padding
+        column += padding
+    positions[len(plain)] = output_length
+    expanded = Text("".join(output), style=text.style)
+    for span in text.spans:
+        expanded.stylize(span.style, positions[span.start], positions[span.end])
+    return expanded
+
+
 def topic_label(topic: ParsedTopic, position: int) -> str:
     if topic.title:
         return topic.title
@@ -141,7 +186,7 @@ class TopicView(Static):
         interactive: bool = True,
         action_namespace: str = "app",
         start_block: int = 0,
-        show_heading: bool = True,
+        show_heading: bool = False,
         blocks: Optional[tuple] = None,
         target_base: int = 0,
         id: Optional[str] = None,
@@ -200,14 +245,6 @@ class TopicView(Static):
 
         if self.show_heading:
             renderables.append(Text(self.topic.title or "Untitled topic", style="bold"))
-        metadata = []
-        if self.topic.context_names:
-            metadata.append("id: " + ", ".join(self.topic.context_names[:6]))
-        if self.topic.keywords:
-            metadata.append("keywords: " + ", ".join(self.topic.keywords[:8]))
-        if metadata:
-            renderables.append(Text(" · ".join(metadata), style="dim"))
-        renderables.append(Text())
 
         blocks = list(self.blocks) if self.blocks is not None else self.topic.content_blocks
         if not blocks:
@@ -267,6 +304,23 @@ class TopicView(Static):
                 )
                 text.stylize(style, start, end)
             if span.embedded_image and span.embedded_image != last_image_marker:
+                inline = (
+                    self._render_inline_image(
+                        resource,
+                        target,
+                        is_list_marker=(
+                            index == 0
+                            and index + 1 < len(block.text_spans)
+                            and block.text_spans[index + 1].text.startswith("\t")
+                        ),
+                    )
+                    if resource is not None and resource.alignment == "inline"
+                    else None
+                )
+                if inline is not None:
+                    text.append_text(inline)
+                    last_image_marker = span.embedded_image
+                    continue
                 pending = flush_text()
                 if pending is not None:
                     yield pending
@@ -287,11 +341,17 @@ class TopicView(Static):
 
     def _apply_paragraph_layout(self, text: Text, block: TopicTextBlock) -> RenderableType:
         layout = translate_paragraph(block.paragraph_info)
-        if "\t" in text.plain:
-            # Rich cannot apply non-uniform tab stops while preserving spans.
-            # Rebuild only tabbed paragraphs; all semantic emphasis remains on
-            # their source spans in non-tabbed content.
-            text = Text(expand_terminal_tabs(text.plain, layout.tabs))
+        text = _expand_styled_tabs(text, layout.tabs)
+        text.rstrip()
+        list_match = re.match(r"^(?P<marker>\d+[.)]?|[▪•])\s+", text.plain)
+        if list_match:
+            marker = text[: list_match.end("marker")]
+            body = text[list_match.end() :]
+            item = RichTable.grid(expand=True, padding=(0, 1))
+            item.add_column(no_wrap=True)
+            item.add_column(ratio=1)
+            item.add_row(marker, body)
+            return item
         text.justify = layout.alignment
         lines = text.split("\n", allow_blank=True)
         rebuilt = Text()
@@ -330,19 +390,67 @@ class TopicView(Static):
             ),
         )
 
-    def _render_image(self, resource, object_target: Optional[ResolvedTarget] = None) -> RenderableType:
+    def _bitmap_resource(self, resource, target_width: int):
         label = resource.resource_name or resource.reference
         bitmaps = self.document.helpfile.bitmaps
-        key = label
-        bitmap_file = bitmaps.get(key)
-        if bitmap_file is None and key.startswith("|"):
-            bitmap_file = bitmaps.get(key[1:])
-        if bitmap_file is None and not key.startswith("|"):
-            bitmap_file = bitmaps.get("|" + key)
-        target_width = max(8, (self.size.width or 64) - 2)
+        bitmap_file = bitmaps.get(label)
+        if bitmap_file is None and label.startswith("|"):
+            bitmap_file = bitmaps.get(label[1:])
+        if bitmap_file is None and not label.startswith("|"):
+            bitmap_file = bitmaps.get("|" + label)
         picture_index = bitmap_file.select_picture(target_width) if bitmap_file is not None else 0
         extracted = bitmap_file.extract_image(picture_index) if bitmap_file is not None else None
         image = decode_bmp(extracted[1]) if extracted and extracted[0] == "bmp" else None
+        return label, bitmap_file, picture_index, extracted, image
+
+    def _render_inline_image(
+        self,
+        resource,
+        object_target: Optional[ResolvedTarget],
+        *,
+        is_list_marker: bool = False,
+    ) -> Optional[Text]:
+        """Render small inline icons in paragraph flow; leave larger art as blocks."""
+        label, bitmap_file, picture_index, _extracted, image = self._bitmap_resource(resource, 16)
+        if image is None or image.width > 32 or image.height > 32:
+            return None
+        source_hotspots = bitmap_file.bitmaps[picture_index].hotspots if bitmap_file is not None else []
+        if source_hotspots:
+            return None
+        # WinHelp commonly uses a tiny embedded square as a list bullet. A
+        # terminal bullet is clearer than expanding that bitmap to many rows.
+        if object_target is None and is_list_marker and image.width <= 16 and image.height <= 16:
+            return Text("▪")
+
+        raster_hotspots = []
+        selected = -1
+        if object_target is not None:
+            link_index = self.target_base + len(self.targets)
+            self.targets.append(object_target)
+            self.target_lines.append(self._current_line)
+            raster_hotspots.append(
+                RasterHotspot(
+                    0,
+                    0,
+                    image.width,
+                    image.height,
+                    f"{self.action_namespace}.follow_link({link_index})",
+                    reverse_on_select=False,
+                )
+            )
+            if link_index == self.selected_link:
+                selected = 0
+        inline_width = max(1, min(4, round(image.width * 2 / max(image.height, 1))))
+        return HalfBlockRasterizer(max_height=1).render(
+            image,
+            max_width=inline_width,
+            hotspots=raster_hotspots,
+            selected_hotspot=selected,
+        )
+
+    def _render_image(self, resource, object_target: Optional[ResolvedTarget] = None) -> RenderableType:
+        target_width = max(8, (self.size.width or 64) - 2)
+        label, bitmap_file, picture_index, extracted, image = self._bitmap_resource(resource, target_width)
         if image is None:
             reason = "missing resource" if extracted is None else f"unsupported {extracted[0].upper()}"
             placeholder = f"[image: {label}, {resource.alignment}; {reason}]"
@@ -747,7 +855,7 @@ class WinHlpApp(App):
         fixed = self.query_one("#fixed-header", TopicView)
         fixed.document = self.document
         fixed.target_base = 0
-        fixed.show_heading = True
+        fixed.show_heading = False
         fixed.display = bool(layout and layout.fixed_blocks)
         fixed.set_topic(topic if fixed.display else None)
         fixed.blocks = layout.fixed_blocks if layout else ()
@@ -755,7 +863,7 @@ class WinHlpApp(App):
         view = self.query_one("#topic-view", TopicView)
         view.document = self.document
         view.target_base = len(fixed.targets)
-        view.show_heading = not fixed.display
+        view.show_heading = False
         view.set_topic(topic)
         view.blocks = layout.scrolling_blocks if layout else ()
         view.refresh_topic()

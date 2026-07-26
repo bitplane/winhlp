@@ -23,7 +23,11 @@ def layout_topic(topic: "ParsedTopic") -> TopicLayout:
     fixed = []
     scrolling = []
     for block in topic.content_blocks:
-        start = getattr(block, "source_offset", None)
+        start = getattr(block, "source_record_offset", None)
+        if start is None:
+            # Compatibility for callers constructing presentation models
+            # directly rather than through the TOPIC parser.
+            start = getattr(block, "source_offset", None)
         if start is not None and start < boundary:
             fixed.append(block)
         else:
