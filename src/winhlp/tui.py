@@ -19,12 +19,12 @@ from rich.style import Style
 from rich.table import Table as RichTable
 from rich.text import Text
 from textual import events, on
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static
+from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static, Tab, Tabs
 
 from .lib.document import (
     HelpDocument,
@@ -762,13 +762,130 @@ class TopicChoicePopup(ModalScreen):
             self.dismiss(self.topics[index])
 
 
+class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
+    """Windows Help-style Contents and keyword Index browser."""
+
+    INDEX_BROWSE_LIMIT = 400
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("q", "dismiss", "Close"),
+        Binding("enter", "choose", "Display", priority=True),
+    ]
+
+    def __init__(self, document: HelpDocument, initial: str = "contents"):
+        super().__init__()
+        self.document = document
+        self.mode = initial if initial in ("contents", "index") else "contents"
+        self.all_entries: list[NavigationEntry] = []
+        self.entries: list[NavigationEntry] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="help-topics"):
+            yield Label(f"Help Topics: {help_title(self.document.helpfile)}", classes="popup-title")
+            yield Tabs(
+                Tab("Contents", id="contents"),
+                Tab("Index", id="index"),
+                active=self.mode,
+                id="help-tabs",
+            )
+            yield Label("", id="help-instructions")
+            yield Input(placeholder="Type the first few letters of the word…", id="help-index-search")
+            yield ListView(id="help-entries")
+            yield Label("Enter: display · Esc: close", id="popup-hint")
+
+    def on_mount(self) -> None:
+        self._set_mode(self.mode)
+
+    @on(Tabs.TabActivated, "#help-tabs")
+    def tab_activated(self, event: Tabs.TabActivated) -> None:
+        if event.tab.id:
+            self._set_mode(event.tab.id)
+
+    def _set_mode(self, mode: str) -> None:
+        self.mode = mode
+        search = self.query_one("#help-index-search", Input)
+        instructions = self.query_one("#help-instructions", Label)
+        if mode == "index":
+            self.all_entries = self.document.index_entries()
+            search.display = True
+            suffix = (
+                f" Showing the first {self.INDEX_BROWSE_LIMIT} until you type."
+                if len(self.all_entries) > self.INDEX_BROWSE_LIMIT
+                else ""
+            )
+            instructions.update("Type the first few letters, then choose an index entry." + suffix)
+            self._filter_index(search.value)
+            search.focus()
+        else:
+            self.all_entries = self.document.contents_entries()
+            search.display = False
+            instructions.update("Choose a book or topic, then press Enter.")
+            self.entries = list(self.all_entries)
+            self.run_worker(self._replace_entries(), group="help-entries", exclusive=True)
+
+    def _entry_item(self, entry: NavigationEntry) -> ListItem:
+        if self.mode == "contents":
+            icon = "▰" if entry.kind in ("book", "heading") or (entry.topic is None and entry.level == 0) else "◇"
+        else:
+            icon = " "
+        return ListItem(Label(f"{'  ' * entry.level}{icon} {entry.label}"))
+
+    async def _replace_entries(self) -> None:
+        view = self.query_one("#help-entries", ListView)
+        await view.clear()
+        if self.entries:
+            await view.extend(self._entry_item(entry) for entry in self.entries)
+            view.index = 0
+        if self.mode == "contents":
+            view.focus()
+
+    def _filter_index(self, query: str) -> None:
+        folded = query.casefold().strip()
+        if not folded:
+            self.entries = list(self.all_entries[: self.INDEX_BROWSE_LIMIT])
+        else:
+            starts = [
+                entry for entry in self.all_entries if (entry.target or entry.label).casefold().startswith(folded)
+            ]
+            self.entries = (
+                starts or [entry for entry in self.all_entries if folded in (entry.target or entry.label).casefold()]
+            )[: self.INDEX_BROWSE_LIMIT]
+        self.run_worker(self._replace_entries(), group="help-entries", exclusive=True)
+
+    @on(Input.Changed, "#help-index-search")
+    def index_changed(self, event: Input.Changed) -> None:
+        if self.mode == "index":
+            self._filter_index(event.value)
+
+    @on(Input.Submitted, "#help-index-search")
+    def index_submitted(self) -> None:
+        self.action_choose()
+
+    @on(ListView.Selected, "#help-entries")
+    def entry_selected(self) -> None:
+        self.action_choose()
+
+    def action_choose(self) -> None:
+        index = self.query_one("#help-entries", ListView).index
+        if index is None or index >= len(self.entries):
+            return
+        entry = self.entries[index]
+        if entry.kind in ("book", "heading") and entry.topic is None and not entry.topics and not entry.macro:
+            return
+        self.dismiss(entry)
+
+    def action_dismiss(self) -> None:
+        self.dismiss(None)
+
+
 class WinHlpApp(App):
     """Browse a parsed Windows Help file in the terminal."""
 
     CSS = """
     Screen { layout: vertical; background: $background; color: $text; }
     #body { height: 1fr; }
-    #sidebar { width: 30; border-right: solid $primary; background: $panel; }
+    #sidebar { display: none; width: 30; border-right: solid $primary; background: $panel; }
     #search { dock: top; }
     #topics { height: 1fr; }
     #topic-pane { width: 1fr; background: $surface; }
@@ -783,8 +900,13 @@ class WinHlpApp(App):
         color: $text;
     }
     #topic-view, #fixed-header { width: 1fr; height: auto; background: $surface; color: $text; }
-    TopicPopup, DiagnosticPopup { align: center middle; background: $background 70%; }
+    TopicPopup, DiagnosticPopup, HelpTopicsScreen { align: center middle; background: $background 70%; }
     #popup, #diagnostic { width: 80%; height: 80%; padding: 1 2; border: heavy $accent; background: $surface; }
+    #help-topics { width: 82%; height: 86%; padding: 1 2; border: heavy $primary; background: $panel; }
+    #help-tabs { height: 3; }
+    #help-instructions { height: 2; padding: 0 1; }
+    #help-index-search { height: 3; }
+    #help-entries { height: 1fr; background: $surface; }
     #diagnostic { height: auto; max-height: 16; }
     #popup-hint { dock: bottom; height: 1; color: $text-muted; }
     .popup-title { height: 2; text-style: bold; color: $primary; }
@@ -810,11 +932,12 @@ class WinHlpApp(App):
         Binding("enter", "activate_link", "Open link"),
     ]
 
-    def __init__(self, helpfile):
+    def __init__(self, helpfile, *, show_help_topics_on_start: bool = True):
         super().__init__()
         self.register_theme(WINHELP_THEME)
         self.theme = WINHELP_THEME.name
         self.helpfile = helpfile
+        self.show_help_topics_on_start = show_help_topics_on_start
         self.document = helpfile.get_document()
         self.navigator = HelpNavigator(self.document)
         self.document_back_stack: list[tuple[HelpFile, HelpDocument, HelpNavigator]] = []
@@ -844,6 +967,16 @@ class WinHlpApp(App):
         self._update_subtitle()
         self._show_current()
         self.query_one("#topic-view", TopicView).focus()
+        if self.show_help_topics_on_start:
+            self.call_after_refresh(self._show_help_topics, "contents")
+
+    def get_system_commands(self, screen):
+        yield from super().get_system_commands(screen)
+        yield SystemCommand(
+            "Help Topics",
+            "Browse this help file's Contents and Index",
+            self.action_show_topics,
+        )
 
     @staticmethod
     def _topic_items(entries) -> list[ListItem]:
@@ -1101,20 +1234,28 @@ class WinHlpApp(App):
             self._show_current()
 
     def action_focus_search(self) -> None:
+        self.query_one("#sidebar").display = True
         self.query_one("#search", Input).focus()
 
     def action_toggle_sidebar(self) -> None:
         sidebar = self.query_one("#sidebar")
         sidebar.display = not sidebar.display
 
-    async def action_show_topics(self) -> None:
-        await self._set_sidebar_mode("topics")
+    def action_show_topics(self) -> None:
+        self._show_help_topics("contents")
 
-    async def action_show_contents(self) -> None:
-        await self._set_sidebar_mode("contents")
+    def action_show_contents(self) -> None:
+        self._show_help_topics("contents")
 
-    async def action_show_index(self) -> None:
-        await self._set_sidebar_mode("index")
+    def action_show_index(self) -> None:
+        self._show_help_topics("index")
+
+    def _show_help_topics(self, initial: str) -> None:
+        self.push_screen(HelpTopicsScreen(self.document, initial), self._help_entry_chosen)
+
+    def _help_entry_chosen(self, entry: Optional[NavigationEntry]) -> None:
+        if entry is not None:
+            self._activate_navigation_entry(entry)
 
     async def _set_sidebar_mode(self, mode: str) -> None:
         self.sidebar_mode = mode
@@ -1346,7 +1487,9 @@ class WinHlpApp(App):
     def topic_selected(self, event: ListView.Selected) -> None:
         if event.list_view.index is None or event.list_view.index >= len(self.sidebar_entries):
             return
-        entry = self.sidebar_entries[event.list_view.index]
+        self._activate_navigation_entry(self.sidebar_entries[event.list_view.index])
+
+    def _activate_navigation_entry(self, entry: NavigationEntry) -> None:
         if len(entry.topics) > 1:
             self.push_screen(TopicChoicePopup(entry.label, entry.topics), self._topic_chosen)
             return
@@ -1356,7 +1499,7 @@ class WinHlpApp(App):
         topic = entry.topic or (entry.topics[0] if entry.topics else None)
         if topic is None:
             if entry.kind == "unresolved":
-                self.push_screen(DiagnosticPopup(f"Could not resolve Contents target: {entry.target or entry.label}"))
+                self.push_screen(DiagnosticPopup(f"Could not resolve Help target: {entry.target or entry.label}"))
             return
         self.navigator.go_to(topic)
         self._show_current()
