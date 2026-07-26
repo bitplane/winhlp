@@ -670,7 +670,11 @@ class HelpFile(BaseModel):
                     continue
                 reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
                 bitmap_data = self.data[offset + 9 : offset + 9 + used_space]
-                bitmaps[filename] = BitmapFile(filename=filename, raw_data=bitmap_data)
+                bitmaps[filename] = BitmapFile(
+                    filename=filename,
+                    raw_data=bitmap_data,
+                    encoding=self.system.encoding if self.system else "cp1252",
+                )
             except (struct.error, IndexError):
                 continue
 

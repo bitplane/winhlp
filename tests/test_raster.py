@@ -53,6 +53,20 @@ def test_pixels_are_not_reversed_when_no_hotspot_is_selected():
     assert all(not span.style.bold for span in rendered.spans)
 
 
+def test_selected_link_image_is_bold_but_not_reversed():
+    image = decode_bmp(_bmp_24())
+    rendered = HalfBlockRasterizer().render(
+        image,
+        max_width=2,
+        hotspots=[RasterHotspot(0, 0, 2, 2, "follow", reverse_on_select=False)],
+        selected_hotspot=0,
+    )
+
+    assert rendered.spans
+    assert all(not span.style.reverse for span in rendered.spans)
+    assert all(span.style.bold for span in rendered.spans)
+
+
 def test_real_one_and_four_bit_help_bitmaps_decode():
     data = Path(__file__).parent / "data"
     fixtures = [

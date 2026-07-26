@@ -4,16 +4,38 @@ Pictures embedded in |bmN files and MediaView named bitmap resources are stored
 in the SHG/MRB "lP"/"lp" container (doc/helpfile.md:1266-1323): a magic + a table
 of picture offsets, each pointing at a DDB/DIB bitmap or a metafile whose
 dimension header is written as *compressed* integers and whose pixels are packed
-with RunLen and/or LZ77. This module decodes the first picture into a ready-to-
-serve Windows .bmp (bitmaps) or raw metafile (.wmf).
+with RunLen and/or LZ77. This module decodes every picture into a ready-to-serve
+Windows .bmp (bitmaps) or raw metafile (.wmf).
 """
 
 import struct
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from .compression import lz77_decompress
 
 LP_MAGIC = (0x506C, 0x706C)  # "lP" (SHG) / "lp" (MRB)
+
+
+@dataclass(frozen=True)
+class DecodedPicture:
+    """One decoded member of an SHG/MRB picture container."""
+
+    extension: str
+    data: bytes
+    picture_type: int
+    packing: int
+    x_dpi: int = 0
+    y_dpi: int = 0
+    planes: int = 1
+    bit_count: int = 0
+    width: int = 0
+    height: int = 0
+    colors_used: int = 0
+    colors_important: int = 0
+    picture_offset: int = 0
+    hotspot_offset: int = 0
+    hotspot_data: bytes = b""
 
 
 def _cword(data: bytes, pos: int) -> Tuple[int, int]:
@@ -67,25 +89,26 @@ def _build_bmp(width, height, planes, bit_count, n_colors, palette, pixels) -> b
     return file_header + info_header + palette + pixels
 
 
-def _decode_one(raw: bytes, off: int) -> Optional[Tuple[str, bytes]]:
+def _decode_one(raw: bytes, off: int) -> Optional[DecodedPicture]:
     p = off
     picture_type = raw[p]
     packing = raw[p + 1]
     p += 2
 
     if picture_type in (5, 6):  # DDB / DIB
-        _xdpi, p = _cdword(raw, p)
-        _ydpi, p = _cdword(raw, p)
+        x_dpi, p = _cdword(raw, p)
+        y_dpi, p = _cdword(raw, p)
         planes, p = _cword(raw, p)
         bit_count, p = _cword(raw, p)
         width, p = _cdword(raw, p)
         height, p = _cdword(raw, p)
         colors_used, p = _cdword(raw, p)
-        _colors_important, p = _cdword(raw, p)
+        colors_important, p = _cdword(raw, p)
         comp_size, p = _cdword(raw, p)
-        _hotspot_size, p = _cdword(raw, p)
+        hotspot_size, p = _cdword(raw, p)
         comp_offset = struct.unpack_from("<L", raw, p)[0]
-        p += 8  # CompressedOffset + HotspotOffset (both raw uint32, offset used below)
+        hotspot_offset = struct.unpack_from("<L", raw, p + 4)[0]
+        p += 8
 
         n_colors = colors_used or (1 << bit_count if bit_count <= 8 else 0)
         palette = b""
@@ -101,32 +124,73 @@ def _decode_one(raw: bytes, off: int) -> Optional[Tuple[str, bytes]]:
         pixels = _unpack(packing, comp)
         if width <= 0 or height <= 0 or width > 20000 or height > 20000:
             return None
-        return ("bmp", _build_bmp(width, height, planes, bit_count, n_colors, palette, pixels))
+        hotspot_data = raw[off + hotspot_offset : off + hotspot_offset + hotspot_size] if hotspot_offset else b""
+        return DecodedPicture(
+            "bmp",
+            _build_bmp(width, height, planes, bit_count, n_colors, palette, pixels),
+            picture_type,
+            packing,
+            x_dpi,
+            y_dpi,
+            planes,
+            bit_count,
+            width,
+            height,
+            colors_used,
+            colors_important,
+            comp_offset,
+            hotspot_offset,
+            hotspot_data,
+        )
 
     if picture_type == 8:  # metafile
         _mm, p = _cword(raw, p)
-        p += 4  # Width, Height (raw uint16 each)
+        width, height = struct.unpack_from("<HH", raw, p)
+        p += 4
         _decompressed_size, p = _cdword(raw, p)
         comp_size, p = _cdword(raw, p)
-        _hotspot_size, p = _cdword(raw, p)
+        hotspot_size, p = _cdword(raw, p)
         comp_offset = struct.unpack_from("<L", raw, p)[0]
+        hotspot_offset = struct.unpack_from("<L", raw, p + 4)[0]
         comp = raw[off + comp_offset : off + comp_offset + comp_size]
-        return ("wmf", _unpack(packing, comp))
+        hotspot_data = raw[off + hotspot_offset : off + hotspot_offset + hotspot_size] if hotspot_offset else b""
+        return DecodedPicture(
+            "wmf",
+            _unpack(packing, comp),
+            picture_type,
+            packing,
+            width=width,
+            height=height,
+            picture_offset=comp_offset,
+            hotspot_offset=hotspot_offset,
+            hotspot_data=hotspot_data,
+        )
 
     return None
 
 
-def decode_picture(raw: bytes) -> Optional[Tuple[str, bytes]]:
-    """Decode the first picture in an lP/SHG/MRB blob into (extension, bytes)."""
+def decode_pictures(raw: bytes) -> list[DecodedPicture]:
+    """Decode every valid picture in an lP/SHG/MRB container."""
     if len(raw) < 8 or struct.unpack_from("<H", raw, 0)[0] not in LP_MAGIC:
-        return None
+        return []
     num = struct.unpack_from("<H", raw, 2)[0]
-    if num < 1 or 4 + 4 > len(raw):
-        return None
-    off = struct.unpack_from("<L", raw, 4)[0]
-    if not (0 < off < len(raw)):
-        return None
-    try:
-        return _decode_one(raw, off)
-    except (struct.error, IndexError):
-        return None
+    if num < 1 or 4 + num * 4 > len(raw):
+        return []
+    pictures = []
+    for index in range(num):
+        off = struct.unpack_from("<L", raw, 4 + index * 4)[0]
+        if not (0 < off < len(raw)):
+            continue
+        try:
+            picture = _decode_one(raw, off)
+        except (struct.error, IndexError):
+            picture = None
+        if picture is not None:
+            pictures.append(picture)
+    return pictures
+
+
+def decode_picture(raw: bytes) -> Optional[Tuple[str, bytes]]:
+    """Compatibility wrapper returning the first decoded picture."""
+    pictures = decode_pictures(raw)
+    return (pictures[0].extension, pictures[0].data) if pictures else None

@@ -98,6 +98,7 @@ class SystemFile(InternalFile):
     groups: list = []  # Type 13: GROUPS definitions
     dllmaps: list = []  # Type 19: DLLMAPS definitions
     keyword_indices: list = []  # Characters that have keyword index files (from type 14 records)
+    keyword_index_titles: dict = {}
     # parent_hlp is a back-reference (circular); exclude=True keeps it out of
     # model_dump() while letting Pydantic recursively serialize everything else
     # (the old custom serializer returned a raw __dict__ of undumped submodels).
@@ -247,7 +248,14 @@ class SystemFile(InternalFile):
             btree_name = data[0:10].decode("ascii", errors="ignore").split("\x00")[0]
             map_name = data[10:20].decode("ascii", errors="ignore").split("\x00")[0]
             data_name = data[20:30].decode("ascii", errors="ignore").split("\x00")[0]
-            title = data[30:110].decode("ascii", errors="ignore").split("\x00")[0]
+            title = self._decode_text(data[30:110].split(b"\x00")[0])
+            stem = btree_name.lstrip("|")
+            marker = stem.upper().find("KWBTREE")
+            char = stem[:marker] if marker > 0 else ""
+            if len(char) == 1 and char not in self.keyword_indices:
+                self.keyword_indices.append(char)
+            if len(char) == 1:
+                self.keyword_index_titles[char] = title
 
             parsed_record = {
                 "format": "KEYINDEX",

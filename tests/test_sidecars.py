@@ -99,3 +99,69 @@ def test_lp_picture_decodes_to_sane_bmp():
     assert 0 < width < 10000 and 0 < abs(height) < 10000
     # Header + pixels must match the declared file size (a well-formed BMP).
     assert struct.unpack_from("<I", data, 2)[0] == len(data)
+
+
+def _cword(value):
+    return bytes((value << 1,))
+
+
+def _cdword(value):
+    return struct.pack("<H", value << 1)
+
+
+def _lp_dib(rgb, hotspot=b""):
+    pixels = bytes((rgb[2], rgb[1], rgb[0], 0))
+    fields = (
+        bytes((6, 0))
+        + _cdword(96)
+        + _cdword(96)
+        + _cword(1)
+        + _cword(24)
+        + _cdword(1)
+        + _cdword(1)
+        + _cdword(0)
+        + _cdword(0)
+        + _cdword(len(pixels))
+        + _cdword(len(hotspot))
+    )
+    data_offset = len(fields) + 8
+    hotspot_offset = data_offset + len(pixels) if hotspot else 0
+    return fields + struct.pack("<II", data_offset, hotspot_offset) + pixels + hotspot
+
+
+def test_lp_container_preserves_all_pictures_and_typed_hotspots():
+    hotspot = (
+        struct.pack("<BHI", 1, 1, 0)
+        + struct.pack("<BBBHHHHI", 0xE2, 0, 0, 0, 0, 1, 1, 0x12345678)
+        + b"Details\x00CTX_DETAILS\x00"
+    )
+    first = _lp_dib((255, 0, 0), hotspot)
+    second = _lp_dib((0, 255, 0))
+    first_offset = 12
+    second_offset = first_offset + len(first)
+    raw = struct.pack("<HHII", 0x706C, 2, first_offset, second_offset) + first + second
+
+    bitmap_file = BitmapFile(filename="|bm0", raw_data=raw)
+
+    assert len(bitmap_file.bitmaps) == 2
+    assert bitmap_file.bitmaps[0].header.width == 1
+    parsed = bitmap_file.bitmaps[0].hotspots[0]
+    assert parsed.hotspot_type == "popup"
+    assert parsed.target == "CTX_DETAILS"
+    assert parsed.name == "Details"
+    assert bitmap_file.extract_image(1)[0] == "bmp"
+
+
+def test_hotspot_strings_use_help_file_encoding():
+    hotspot = (
+        struct.pack("<BHI", 1, 1, 0)
+        + struct.pack("<BBBHHHHI", 0xE3, 0, 0, 0, 0, 1, 1, 0)
+        + "詳細\x00コンテキスト\x00".encode("cp932")
+    )
+    picture = _lp_dib((0, 0, 0), hotspot)
+    raw = struct.pack("<HHI", 0x506C, 1, 8) + picture
+
+    parsed = BitmapFile(filename="|bm0", raw_data=raw, encoding="cp932").bitmaps[0].hotspots[0]
+
+    assert parsed.name == "詳細"
+    assert parsed.target == "コンテキスト"

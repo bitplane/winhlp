@@ -30,10 +30,12 @@ winhlp file.hlp --html out.html        # render the whole file to one HTML page
 winhlp file.hlp --html out.html --images extract   # write images to out_images/
 ```
 
-The terminal viewer has a searchable topic sidebar, keyboard and mouse links,
-back/forward history, WinHelp browse-sequence navigation, popup topics, tables,
-and visible placeholders for embedded images. Press `/` to search, Tab/Shift-Tab
-to select links, Enter to follow one, and `q` to quit.
+The terminal viewer has searchable Topics, structured Contents and Index
+sidebars, keyboard and mouse links, cross-file back/forward history, WinHelp
+browse-sequence navigation, popup and secondary-window topics, formatted tables,
+and inline bitmap/hotspot rendering with descriptive fallbacks. Press `/` to
+search, `o`/`c`/`k` to switch sidebar views, Tab/Shift-Tab to select links,
+Enter to follow one, `i`/`d`/`e` for file/topic/error details, and `q` to quit.
 
 The HTML export is a single self-contained page: a table of contents followed by
 every topic as an anchored section, with internal jumps/popups turned into

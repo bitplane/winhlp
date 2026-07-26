@@ -430,6 +430,11 @@ class TableCell(BaseModel):
     column_span: int = 1
     row_span: int = 1
     alignment: str = "left"  # "left", "center", "right"
+    column_number: Optional[int] = None
+    cell_id: Optional[int] = None
+    formatting_flags: int = 0
+    paragraph_info: Optional[ParagraphInfo] = None
+    border_info: Optional[BorderInfo] = None
     raw_data: dict
 
     def get_plain_text(self) -> str:
@@ -482,6 +487,8 @@ class TopicTextBlock(BaseModel):
     text_spans: List[TextSpan] = []
     paragraph_info: Optional[ParagraphInfo] = None
     hotspot_mappings: List[HotspotMapping] = []
+    source_offset: Optional[int] = None
+    source_end_offset: Optional[int] = None
 
 
 class TopicTableBlock(BaseModel):
@@ -489,6 +496,8 @@ class TopicTableBlock(BaseModel):
 
     kind: Literal["table"] = "table"
     table: Table
+    source_offset: Optional[int] = None
+    source_end_offset: Optional[int] = None
 
 
 TopicContentBlock = Union[TopicTextBlock, TopicTableBlock]
@@ -1085,6 +1094,7 @@ class TopicFile(InternalFile):
             self._start_new_topic(topic_header, title=title, entry_macros=entry_macros)
         elif link.record_type == 0x20:  # TL_DISPLAY
             paragraph_info = self._parse_paragraph_info(link_data1)
+            source_offset = self.topic_offset
             # A display record advances the running TOPICOFFSET by its character
             # count (helpdeco.c:3359-3362 `x1 = scanword; TopicOffset += x1`).
             if paragraph_info and paragraph_info.topic_length:
@@ -1096,7 +1106,9 @@ class TopicFile(InternalFile):
             text_spans, hotspot_mappings = self._parse_topic_content_interleaved(
                 self.remaining_linkdata1, link_data2, link.data_len2, link.block_size, link.data_len1
             )
-            self._add_content_to_current_topic(text_spans, paragraph_info, hotspot_mappings)
+            self._add_content_to_current_topic(
+                text_spans, paragraph_info, hotspot_mappings, source_offset, self.topic_offset
+            )
         elif link.record_type == 0x01:  # TL_DISPLAY30 (Windows 3.0)
             paragraph_info = self._parse_paragraph_info_30(link_data1)
             link.text_content = self._decode_text(
@@ -1110,11 +1122,18 @@ class TopicFile(InternalFile):
             self._add_content_to_current_topic(text_spans, paragraph_info, hotspot_mappings)
         elif link.record_type == 0x23:  # TL_TABLE
             paragraph_info = self._parse_paragraph_info(link_data1)
+            source_offset = self.topic_offset
             table = self._parse_table_content(
-                link_data2, link.data_len2, link.block_size, link.data_len1, paragraph_info
+                link_data2,
+                link.data_len2,
+                link.block_size,
+                link.data_len1,
+                paragraph_info,
+                paragraph_info.raw_data["raw"] + self.remaining_linkdata1,
             )
             if table:
-                self._add_table_to_current_topic(table)
+                self.topic_offset += max(0, table.raw_data.get("topic_offset_increment", 0))
+                self._add_table_to_current_topic(table, source_offset, self.topic_offset)
         else:
             # Unknown record type. _parse_links only dispatches 0x01/0x02/0x20/0x23
             # so this is normally unreachable, but degrade gracefully rather than
@@ -1738,6 +1757,8 @@ class TopicFile(InternalFile):
         text_spans: List[TextSpan],
         paragraph_info: Optional[ParagraphInfo],
         hotspot_mappings: List[HotspotMapping] = None,
+        source_offset: Optional[int] = None,
+        source_end_offset: Optional[int] = None,
     ):
         """Add content spans and hotspot mappings to the current topic."""
         if not self.parsed_topics:
@@ -1750,6 +1771,8 @@ class TopicFile(InternalFile):
                 text_spans=text_spans,
                 paragraph_info=paragraph_info,
                 hotspot_mappings=hotspot_mappings or [],
+                source_offset=source_offset,
+                source_end_offset=source_end_offset,
             )
         )
         span_base = len(current_topic.text_spans)
@@ -2029,7 +2052,13 @@ class TopicFile(InternalFile):
         return text_spans, hotspot_mappings
 
     def _parse_table_content(
-        self, data: bytes, data_len2: int, block_size: int, data_len1: int, paragraph_info: Optional[ParagraphInfo]
+        self,
+        data: bytes,
+        data_len2: int,
+        block_size: int,
+        data_len1: int,
+        paragraph_info: Optional[ParagraphInfo],
+        table_link_data1: Optional[bytes] = None,
     ) -> Optional[Table]:
         """Parse table content from RecordType 0x23 data.
 
@@ -2040,7 +2069,7 @@ class TopicFile(InternalFile):
             return None
 
         # Parse LinkData1 to get table structure from helldeco.c
-        link_data1 = paragraph_info.raw_data["raw"]
+        link_data1 = table_link_data1 or paragraph_info.raw_data["raw"]
         offset = 0
 
         # Skip the expanded size (already parsed in paragraph_info)
@@ -2096,6 +2125,7 @@ class TopicFile(InternalFile):
         # for (col = 0; (TopicLink.RecordType == TL_TABLE ? *(int16_t*)ptr != -1 : col == 0) && ptr < LinkData1 + TopicLink.DataLen1 - sizeof(TOPICLINK); col++)
         link_data1_ptr = offset
         col = 0
+        column_formats = []
 
         while link_data1_ptr < len(link_data1) - 21:  # sizeof(TOPICLINK) = 21
             # Check termination condition for TL_TABLE
@@ -2106,12 +2136,10 @@ class TopicFile(InternalFile):
 
             # Parse column header following helldeco.c structure
             if link_data1_ptr + 4 < len(link_data1):
-                _column_number = struct.unpack_from("<h", link_data1, link_data1_ptr)[0]
-                _formatting_flags = struct.unpack_from("<H", link_data1, link_data1_ptr + 2)[0]
-                _cell_id = struct.unpack_from("<B", link_data1, link_data1_ptr + 4)[0] - 0x80
+                column_number = struct.unpack_from("<h", link_data1, link_data1_ptr)[0]
+                formatting_flags = struct.unpack_from("<H", link_data1, link_data1_ptr + 2)[0]
+                cell_id = struct.unpack_from("<B", link_data1, link_data1_ptr + 4)[0] - 0x80
                 link_data1_ptr += 5
-
-                # TODO: Use column_number, formatting_flags, and cell_id for proper table cell formatting
             else:
                 break
 
@@ -2123,6 +2151,7 @@ class TopicFile(InternalFile):
             if link_data1_ptr + 1 < len(link_data1):
                 para_bits = struct.unpack_from("<H", link_data1, link_data1_ptr)[0]
                 link_data1_ptr += 2
+                cell_border = None
 
                 # Parse conditional fields based on paragraph bits (from helldeco.c)
                 if para_bits & 0x0001:  # unknown bit
@@ -2141,11 +2170,20 @@ class TopicFile(InternalFile):
                     first_line_indent, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
                 if para_bits & 0x0100:  # border info
                     if link_data1_ptr < len(link_data1):
-                        _border_info = link_data1[link_data1_ptr]
+                        border_bits = link_data1[link_data1_ptr]
                         link_data1_ptr += 1
                         border_width, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
-
-                        # TODO: Use border_info and border_width for table cell border formatting
+                        cell_border = BorderInfo(
+                            border_box=bool(border_bits & 0x01),
+                            border_top=bool(border_bits & 0x02),
+                            border_left=bool(border_bits & 0x04),
+                            border_bottom=bool(border_bits & 0x08),
+                            border_right=bool(border_bits & 0x10),
+                            border_thick=bool(border_bits & 0x20),
+                            border_double=bool(border_bits & 0x40),
+                            border_unknown=bool(border_bits & 0x80),
+                            border_width=border_width,
+                        )
                 if para_bits & 0x0200:  # tab info
                     tab_count, link_data1_ptr = self.scan_word(link_data1, link_data1_ptr)
                     for _ in range(tab_count):
@@ -2156,6 +2194,16 @@ class TopicFile(InternalFile):
                             if link_data1_ptr < len(link_data1):
                                 tab_type, link_data1_ptr = self.scan_word(link_data1, link_data1_ptr)
 
+                column_formats.append(
+                    {
+                        "column_number": column_number,
+                        "formatting_flags": formatting_flags,
+                        "cell_id": cell_id,
+                        "alignment": "center" if para_bits & 0x0800 else "right" if para_bits & 0x0400 else "left",
+                        "border_info": cell_border,
+                    }
+                )
+
             col += 1
 
         # Parse actual table cell content from LinkData2
@@ -2164,6 +2212,11 @@ class TopicFile(InternalFile):
             # Parse table cells using proper TL_TABLE cell delimiters from helldeco.c
             # Tables use 0x82 commands with special formatting for cells
             rows = self._parse_table_cells_from_text(table_text, cols, column_widths)
+            for row in rows:
+                for index, cell in enumerate(row.cells):
+                    if index < len(column_formats):
+                        cell_format = column_formats[index]
+                        row.cells[index] = cell.model_copy(update=cell_format)
 
         if not rows:
             return None
@@ -2182,6 +2235,7 @@ class TopicFile(InternalFile):
                 "column_gaps": column_gaps,
                 "expanded_size": expanded_size,
                 "topic_offset_increment": topic_offset_increment,
+                "column_formats": column_formats,
             },
         )
 
@@ -2264,7 +2318,9 @@ class TopicFile(InternalFile):
         # Could be enhanced to handle formatting commands within cells
         return [TextSpan(text=cell_text, raw_data={"type": "cell_text"})]
 
-    def _add_table_to_current_topic(self, table: Table):
+    def _add_table_to_current_topic(
+        self, table: Table, source_offset: Optional[int] = None, source_end_offset: Optional[int] = None
+    ):
         """Add a table to the current topic."""
         if not self.parsed_topics:
             # Create a default topic if none exists
@@ -2272,7 +2328,9 @@ class TopicFile(InternalFile):
 
         current_topic = self.parsed_topics[-1]
         current_topic.tables.append(table)
-        current_topic.content_blocks.append(TopicTableBlock(table=table))
+        current_topic.content_blocks.append(
+            TopicTableBlock(table=table, source_offset=source_offset, source_end_offset=source_end_offset)
+        )
 
     def get_topic_by_number(self, topic_number: int) -> Optional[ParsedTopic]:
         """Get a parsed topic by its topic number."""

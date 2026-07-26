@@ -32,6 +32,7 @@ class RasterHotspot:
     width: int
     height: int
     action: Optional[str] = None
+    reverse_on_select: bool = True
 
     def contains(self, x: int, y: int) -> bool:
         return self.x <= x < self.x + self.width and self.y <= y < self.y + self.height
@@ -139,10 +140,11 @@ class HalfBlockRasterizer:
                 )
                 action = hotspots[hotspot_index].action if hotspot_index >= 0 else None
                 is_selected = hotspot_index >= 0 and hotspot_index == selected_hotspot
+                reverse_on_select = hotspots[hotspot_index].reverse_on_select if hotspot_index >= 0 else False
                 style = Style(
                     color=_rich_color(image.pixel(source_x, top_y)),
                     bgcolor=_rich_color(image.pixel(source_x, bottom_y)),
-                    reverse=is_selected,
+                    reverse=is_selected and reverse_on_select,
                     bold=is_selected,
                     meta={"@click": action} if action else None,
                 )

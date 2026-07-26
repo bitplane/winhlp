@@ -20,6 +20,10 @@ class HotspotInfo(BaseModel):
     width: int
     height: int
     hash_value: int
+    hotspot_type: str = "topic"
+    target: str = ""
+    name: str = ""
+    visible: bool = True
     raw_data: dict
 
 
@@ -64,6 +68,7 @@ class BitmapFile(InternalFile):
     """
 
     bitmaps: List[ExtractedBitmap] = []
+    encoding: str = "cp1252"
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -88,34 +93,43 @@ class BitmapFile(InternalFile):
         # garbage dimensions, so use the real decoder instead.
         magic = struct.unpack_from("<H", self.raw_data, 0)[0]
         if magic in (0x506C, 0x706C):
-            from ..picture import decode_picture
+            from ..picture import decode_pictures
 
-            decoded = decode_picture(self.raw_data)
+            decoded = decode_pictures(self.raw_data)
             if decoded:
-                self._parse_decoded_picture(*decoded)
+                self.bitmaps = []
+                for picture in decoded:
+                    self._parse_decoded_picture(picture)
                 return
 
         self._parse_bitmap_data()
 
-    def _parse_decoded_picture(self, ext: str, data: bytes):
+    def _parse_decoded_picture(self, picture):
         """Store an already-decoded picture (complete .bmp or raw .wmf bytes)."""
         header = BitmapHeader(
-            x_pels=0,
-            y_pels=0,
-            planes=1,
-            bit_count=0,
-            width=0,
-            height=0,
-            colors_used=0,
-            colors_important=0,
-            data_size=len(data),
-            hotspot_size=0,
-            picture_offset=0,
-            hotspot_offset=0,
+            x_pels=picture.x_dpi,
+            y_pels=picture.y_dpi,
+            planes=picture.planes,
+            bit_count=picture.bit_count,
+            width=picture.width,
+            height=picture.height,
+            colors_used=picture.colors_used,
+            colors_important=picture.colors_important,
+            data_size=len(picture.data),
+            hotspot_size=len(picture.hotspot_data),
+            picture_offset=picture.picture_offset,
+            hotspot_offset=picture.hotspot_offset,
             raw_data={},
         )
-        self.bitmaps.insert(
-            0, ExtractedBitmap(header=header, bitmap_data=data, hotspots=[], format_type=f"ready:{ext}", raw_data={})
+        hotspots = self._parse_hotspot_section(picture.hotspot_data)
+        self.bitmaps.append(
+            ExtractedBitmap(
+                header=header,
+                bitmap_data=picture.data,
+                hotspots=hotspots,
+                format_type=f"ready:{picture.extension}",
+                raw_data={"picture_type": picture.picture_type, "packing": picture.packing},
+            )
         )
 
     def _parse_raw_bmp(self):
@@ -285,6 +299,75 @@ class BitmapFile(InternalFile):
 
         return hotspots
 
+    def _parse_hotspot_section(self, data: bytes) -> List[HotspotInfo]:
+        """Parse the complete SHG hotspot section, including its string data."""
+        if len(data) < 7:
+            return []
+        try:
+            _always_one, count, macro_size = struct.unpack_from("<BHI", data)
+        except struct.error:
+            return []
+        records_start = 7
+        records_end = records_start + count * 15
+        strings_at = records_end + macro_size
+        if records_end > len(data) or strings_at > len(data):
+            return []
+
+        strings = []
+        cursor = strings_at
+        for _ in range(count):
+            pair = []
+            for _field in range(2):
+                end = data.find(b"\x00", cursor)
+                if end < 0:
+                    end = len(data)
+                pair.append(data[cursor:end].decode(self.encoding, errors="replace"))
+                cursor = min(end + 1, len(data))
+            strings.append(pair)
+
+        kinds = {
+            0xC8: "macro",
+            0xCC: "macro",
+            0xE2: "popup",
+            0xE3: "topic",
+            0xE6: "popup",
+            0xE7: "topic",
+            0xEA: "external_popup",
+            0xEB: "external_jump",
+            0xEE: "external_popup",
+            0xEF: "external_jump",
+        }
+        hotspots = []
+        for index in range(count):
+            offset = records_start + index * 15
+            try:
+                id0, id1, id2, x, y, width, height, hash_value = struct.unpack_from("<BBBHHHHI", data, offset)
+            except struct.error:
+                break
+            name, string_target = strings[index] if index < len(strings) else ("", "")
+            kind = kinds.get(id0, "unresolved")
+            target = string_target
+            if kind in ("topic", "popup") and not target:
+                target = f"{hash_value:08X}"
+            hotspots.append(
+                HotspotInfo(
+                    id0=id0,
+                    id1=id1,
+                    id2=id2,
+                    x=x,
+                    y=y,
+                    width=width,
+                    height=height,
+                    hash_value=hash_value,
+                    hotspot_type=kind,
+                    target=target,
+                    name=name,
+                    visible=id0 not in (0xCC, 0xE6, 0xE7, 0xEE, 0xEF),
+                    raw_data={"raw": data[offset : offset + 15]},
+                )
+            )
+        return hotspots
+
     def _determine_format_type(self, header: BitmapHeader, bitmap_data: bytes) -> str:
         """
         Determines the bitmap format type based on characteristics.
@@ -409,6 +492,17 @@ class BitmapFile(InternalFile):
             return ("wmf" if bitmap.format_type == "wmf" else "mrb", bitmap.bitmap_data)
         # DDB and anything else: return the decompressed bytes unwrapped.
         return (bitmap.format_type, bitmap.bitmap_data)
+
+    def select_picture(self, target_width: int) -> int:
+        """Choose the bitmap variant closest to the requested display width."""
+        if not self.bitmaps:
+            return 0
+        candidates = [
+            (index, abs((bitmap.header.width or target_width) - target_width))
+            for index, bitmap in enumerate(self.bitmaps)
+            if bitmap.format_type in ("bmp", "shg", "rawbmp") or bitmap.format_type.startswith("ready:bmp")
+        ]
+        return min(candidates, key=lambda candidate: candidate[1])[0] if candidates else 0
 
     def get_hotspot_context_names(self) -> Dict[int, str]:
         """

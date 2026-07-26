@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import os
+import locale
+import struct
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
 from rich import box
+from rich.align import Align
 from rich.console import Group, RenderableType
 from rich.panel import Panel
+from rich.padding import Padding
 from rich.style import Style
 from rich.table import Table as RichTable
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -29,8 +34,10 @@ from .lib.document import (
     parse_embedded_resource,
 )
 from .lib.hlp import HelpFile
+from .lib.layout import layout_topic
 from .lib.internal_files.topic import ParsedTopic, TextSpan, TopicTableBlock, TopicTextBlock
 from .lib.raster import HalfBlockRasterizer, RasterHotspot, TerminalRasterizer, decode_bmp
+from .lib.terminal_layout import expand_terminal_tabs, translate_paragraph
 
 
 WINHELP_THEME = Theme(
@@ -76,6 +83,33 @@ def _span_text(span: TextSpan) -> str:
     return text
 
 
+def _partial_border(text: Text, border) -> Text:
+    """Render selected paragraph border sides without inventing missing sides."""
+    vertical = "║" if border.double else "┃" if border.thick else "│"
+    horizontal = "═" if border.double else "━" if border.thick else "─"
+    lines = text.split("\n", allow_blank=True)
+    width = max((line.cell_len for line in lines), default=1)
+    output = Text()
+    if border.top:
+        output.append(horizontal * max(1, width + 2) + "\n")
+    for index, line in enumerate(lines):
+        output.append(vertical + " " if border.left else "")
+        output.append_text(line)
+        output.append(" " * max(0, width - line.cell_len))
+        output.append(" " + vertical if border.right else "")
+        if index + 1 < len(lines):
+            output.append("\n")
+    if border.bottom:
+        output.append("\n" + horizontal * max(1, width + 2))
+    return output
+
+
+def _renderable_height(renderable: RenderableType) -> int:
+    if isinstance(renderable, Text):
+        return max(1, renderable.plain.count("\n") + 1)
+    return 1
+
+
 def topic_label(topic: ParsedTopic, position: int) -> str:
     if topic.title:
         return topic.title
@@ -86,6 +120,16 @@ def topic_label(topic: ParsedTopic, position: int) -> str:
 
 class TopicView(Static):
     """A Rich-backed topic renderer with keyboard-selectable inline hotspots."""
+
+    @property
+    def link_style(self) -> Style:
+        """Keep Textual's automatic link decoration away from raster pixels."""
+        return Style.null()
+
+    @property
+    def link_style_hover(self) -> Style:
+        """Use temporary reverse-video for hover while preserving the resting image."""
+        return Style(reverse=True)
 
     can_focus = True
 
@@ -98,6 +142,8 @@ class TopicView(Static):
         action_namespace: str = "app",
         start_block: int = 0,
         show_heading: bool = True,
+        blocks: Optional[tuple] = None,
+        target_base: int = 0,
         id: Optional[str] = None,
     ):
         super().__init__(id=id)
@@ -107,7 +153,10 @@ class TopicView(Static):
         self.action_namespace = action_namespace
         self.start_block = start_block
         self.show_heading = show_heading
+        self.blocks = blocks
+        self.target_base = target_base
         self.targets: list[ResolvedTarget] = []
+        self.target_lines: list[int] = []
         self.image_placeholders: list[str] = []
         self.rasterizer: TerminalRasterizer = HalfBlockRasterizer()
         self.selected_link = -1
@@ -117,7 +166,11 @@ class TopicView(Static):
 
     def set_topic(self, topic: Optional[ParsedTopic]) -> None:
         self.topic = topic
+        self.blocks = None
         self.selected_link = -1
+        self.refresh_topic()
+
+    def on_resize(self, _event=None) -> None:
         self.refresh_topic()
 
     def select_next_link(self, direction: int) -> bool:
@@ -129,12 +182,15 @@ class TopicView(Static):
         return True
 
     def selected_target(self) -> Optional[ResolvedTarget]:
-        if 0 <= self.selected_link < len(self.targets):
-            return self.targets[self.selected_link]
+        local = self.selected_link - self.target_base
+        if 0 <= local < len(self.targets):
+            return self.targets[local]
         return None
 
     def refresh_topic(self) -> None:
         self.targets = []
+        self.target_lines = []
+        self._current_line = 0
         self.image_placeholders = []
         renderables: list[RenderableType] = []
         if self.topic is None:
@@ -153,15 +209,18 @@ class TopicView(Static):
             renderables.append(Text(" · ".join(metadata), style="dim"))
         renderables.append(Text())
 
-        blocks = self.topic.content_blocks
+        blocks = list(self.blocks) if self.blocks is not None else self.topic.content_blocks
         if not blocks:
             blocks = [TopicTextBlock(text_spans=self.topic.text_spans)]
             blocks.extend(TopicTableBlock(table=table) for table in self.topic.tables)
         for block in blocks[self.start_block :]:
             if isinstance(block, TopicTextBlock):
-                renderables.extend(self._render_text_block(block))
+                rendered_block = list(self._render_text_block(block))
+                renderables.extend(rendered_block)
+                self._current_line += sum(_renderable_height(item) for item in rendered_block)
             else:
                 renderables.append(self._render_table(block))
+                self._current_line += max(1, len(block.table.rows))
         if self.topic.annotations:
             notes = Text()
             for annotation in self.topic.annotations:
@@ -197,8 +256,9 @@ class TopicView(Static):
                 if separator and macro:
                     target = self.document.resolve_target(f"macro:{macro}")
             if target is not None and self.interactive and end > start:
-                link_index = len(self.targets)
+                link_index = self.target_base + len(self.targets)
                 self.targets.append(target)
+                self.target_lines.append(self._current_line + text.plain[:start].count("\n"))
                 selected = link_index == self.selected_link
                 style = Style(
                     underline=True,
@@ -226,39 +286,41 @@ class TopicView(Static):
             yield pending
 
     def _apply_paragraph_layout(self, text: Text, block: TopicTextBlock) -> RenderableType:
-        paragraph = block.paragraph_info
-        if paragraph is None:
-            return text
-        if paragraph.bits.center_aligned_paragraph:
-            text.justify = "center"
-        elif paragraph.bits.right_aligned_paragraph:
-            text.justify = "right"
-        indent = max(0, min(12, (paragraph.left_indent or 0) // 120))
-        if indent:
-            text = Text(" " * indent) + text
-        if paragraph.tab_info and paragraph.tab_info.tabs:
-            first_stop = max(2, min(16, paragraph.tab_info.tabs[0].position // 120))
-            text.expand_tabs(first_stop)
-        # Old WinHelp paragraph values are commonly tenths of a twip-scaled
-        # unit (e.g. 12 becomes roughly 6pt). Do not round every positive value
-        # up to a whole terminal row; accumulate only approximately line-sized
-        # spacing.
-        above = max(0, (paragraph.spacing_above or 0) // 24)
-        below = max(0, (paragraph.spacing_below or 0) // 24)
-        if above:
-            text = Text("\n" * above) + text
-        if below:
-            text.append("\n" * below)
-        border = paragraph.border_info
-        if border and any(
-            (border.border_box, border.border_top, border.border_left, border.border_bottom, border.border_right)
-        ):
-            return Panel(text, box=box.DOUBLE if border.border_double else box.SQUARE, padding=(0, 1))
+        layout = translate_paragraph(block.paragraph_info)
+        if "\t" in text.plain:
+            # Rich cannot apply non-uniform tab stops while preserving spans.
+            # Rebuild only tabbed paragraphs; all semantic emphasis remains on
+            # their source spans in non-tabbed content.
+            text = Text(expand_terminal_tabs(text.plain, layout.tabs))
+        text.justify = layout.alignment
+        lines = text.split("\n", allow_blank=True)
+        rebuilt = Text()
+        for index, line in enumerate(lines):
+            indent = layout.left_indent + (layout.first_line_indent if index == 0 else 0)
+            indent = max(0, min(24, indent))
+            rebuilt.append(" " * indent)
+            rebuilt.append_text(line)
+            if layout.right_indent:
+                rebuilt.append(" " * min(24, layout.right_indent))
+            if index + 1 < len(lines):
+                rebuilt.append("\n" * (1 + layout.line_spacing))
+        text = rebuilt
+        if layout.spacing_above:
+            text = Text("\n" * layout.spacing_above) + text
+        if layout.spacing_below:
+            text.append("\n" * layout.spacing_below)
+        border = layout.border
+        if border:
+            if all((border.top, border.right, border.bottom, border.left)):
+                style = box.DOUBLE if border.double else box.HEAVY if border.thick else box.SQUARE
+                return Panel(text, box=style, padding=(0, 1))
+            text = _partial_border(text, border)
         return text
 
     def _render_object_button(self, target: ResolvedTarget) -> Text:
-        link_index = len(self.targets)
+        link_index = self.target_base + len(self.targets)
         self.targets.append(target)
+        self.target_lines.append(self._current_line)
         return Text(
             "▣",
             Style(
@@ -277,34 +339,51 @@ class TopicView(Static):
             bitmap_file = bitmaps.get(key[1:])
         if bitmap_file is None and not key.startswith("|"):
             bitmap_file = bitmaps.get("|" + key)
-        extracted = bitmap_file.extract_image(0) if bitmap_file is not None else None
+        target_width = max(8, (self.size.width or 64) - 2)
+        picture_index = bitmap_file.select_picture(target_width) if bitmap_file is not None else 0
+        extracted = bitmap_file.extract_image(picture_index) if bitmap_file is not None else None
         image = decode_bmp(extracted[1]) if extracted and extracted[0] == "bmp" else None
         if image is None:
-            placeholder = f"[image: {label}, {resource.alignment}]"
+            reason = "missing resource" if extracted is None else f"unsupported {extracted[0].upper()}"
+            placeholder = f"[image: {label}, {resource.alignment}; {reason}]"
             self.image_placeholders.append(placeholder)
             return Text(placeholder, style="italic dim")
 
-        source_hotspots = bitmap_file.bitmaps[0].hotspots if bitmap_file.bitmaps else []
+        source_hotspots = bitmap_file.bitmaps[picture_index].hotspots if bitmap_file.bitmaps else []
         raster_hotspots = []
         labels = Text()
         selected_raster_hotspot = -1
         if object_target is not None:
-            link_index = len(self.targets)
+            link_index = self.target_base + len(self.targets)
             self.targets.append(object_target)
+            self.target_lines.append(self._current_line)
             action = f"{self.action_namespace}.follow_link({link_index})"
-            raster_hotspots.append(RasterHotspot(0, 0, image.width, image.height, action))
+            # Reverse-video swaps the foreground/background halves of every
+            # raster cell, visibly scrambling a whole linked image.
+            raster_hotspots.append(
+                RasterHotspot(
+                    0,
+                    0,
+                    image.width,
+                    image.height,
+                    action,
+                    reverse_on_select=False,
+                )
+            )
             if link_index == self.selected_link:
                 selected_raster_hotspot = 0
         for hotspot_number, hotspot in enumerate(source_hotspots, start=1):
-            target = self.document.resolve_context_hash(hotspot.hash_value)
-            link_index = len(self.targets)
+            target = self.document.resolve_bitmap_hotspot(hotspot)
+            link_index = self.target_base + len(self.targets)
             self.targets.append(target)
+            self.target_lines.append(self._current_line)
             if link_index == self.selected_link:
                 selected_raster_hotspot = len(raster_hotspots)
             action = f"{self.action_namespace}.follow_link({link_index})"
             raster_hotspots.append(RasterHotspot(hotspot.x, hotspot.y, hotspot.width, hotspot.height, action))
             start = len(labels)
-            labels.append(f"[{hotspot_number}] {target.topic.title if target.topic else target.original}\n")
+            accessible_label = hotspot.name or (target.topic.title if target.topic else target.original)
+            labels.append(f"[{hotspot_number}] {accessible_label}\n")
             labels.stylize(
                 Style(underline=True, reverse=link_index == self.selected_link, meta={"@click": action}),
                 start,
@@ -312,14 +391,18 @@ class TopicView(Static):
             )
         rendered = self.rasterizer.render(
             image,
-            max_width=max(8, (self.size.width or 64) - 2),
+            max_width=target_width,
             hotspots=raster_hotspots,
             selected_hotspot=selected_raster_hotspot,
         )
-        return Group(rendered, labels) if labels.plain else rendered
+        output = Group(rendered, labels) if labels.plain else rendered
+        if resource.alignment == "right":
+            return Align.right(output)
+        if resource.alignment == "left":
+            return Align.left(output)
+        return output
 
-    @staticmethod
-    def _render_table(block: TopicTableBlock) -> RichTable:
+    def _render_table(self, block: TopicTableBlock) -> RichTable:
         parsed = block.table
         columns = max(parsed.column_count, max((len(row.cells) for row in parsed.rows), default=0), 1)
         table = RichTable(show_header=False, box=box.SIMPLE, pad_edge=False)
@@ -328,19 +411,86 @@ class TopicView(Static):
         for column in range(columns):
             ratio = max(widths[column], 1) if column < len(widths) else max(1, width_total // columns)
             table.add_column(ratio=ratio)
+        occupied = [0] * columns
         for row in parsed.rows:
-            cells = []
-            for cell in row.cells:
-                cell_text = Text()
-                for span in cell.text_spans:
-                    cell_text.append(_span_text(span), _span_style(span))
-                cell_text.justify = cell.alignment
-                if cell.column_span > 1 or cell.row_span > 1:
-                    cell_text.append(f" [span {cell.column_span}×{cell.row_span}]", style="dim")
-                cells.append(cell_text)
-            cells.extend(Text() for _ in range(columns - len(cells)))
+            cells: list[RenderableType] = []
+            source_index = 0
+            column = 0
+            while column < columns:
+                if occupied[column] > 0:
+                    occupied[column] -= 1
+                    cells.append(Text())
+                    column += 1
+                    continue
+                if source_index >= len(row.cells):
+                    cells.append(Text())
+                    column += 1
+                    continue
+                cell = row.cells[source_index]
+                source_index += 1
+                rendered = self._render_table_cell(cell)
+                if row.height and row.height >= 120:
+                    rendered = Padding(rendered, (0, 0, min(4, row.height // 120 - 1), 0))
+                cells.append(rendered)
+                span = max(1, min(cell.column_span, columns - column))
+                if cell.row_span > 1:
+                    for span_column in range(column, column + span):
+                        occupied[span_column] = max(occupied[span_column], cell.row_span - 1)
+                cells.extend(Text() for _ in range(span - 1))
+                column += span
             table.add_row(*cells[:columns])
         return table
+
+    def _render_table_cell(self, cell) -> RenderableType:
+        parts: list[RenderableType] = []
+        text = Text()
+        for span in cell.text_spans:
+            if span.embedded_image:
+                if text.plain:
+                    parts.append(text)
+                    text = Text()
+                resource = parse_embedded_resource(span.embedded_image)
+                if resource is not None:
+                    target = self.document.resolve_target(span.hyperlink_target) if span.hyperlink_target else None
+                    parts.append(self._render_image(resource, target))
+                continue
+            start = len(text)
+            text.append(_span_text(span), _span_style(span))
+            if span.hyperlink_target:
+                target = self.document.resolve_target(span.hyperlink_target)
+                link_index = self.target_base + len(self.targets)
+                self.targets.append(target)
+                self.target_lines.append(self._current_line)
+                text.stylize(
+                    Style(
+                        underline=True,
+                        reverse=link_index == self.selected_link,
+                        meta={"@click": f"{self.action_namespace}.follow_link({link_index})"},
+                    ),
+                    start,
+                    len(text),
+                )
+        text.justify = cell.alignment
+        if text.plain or not parts:
+            parts.append(text)
+        rendered: RenderableType = Group(*parts) if len(parts) > 1 else parts[0]
+        border = translate_paragraph(cell.paragraph_info).border
+        if border is None and cell.border_info is not None:
+            synthetic = cell.border_info
+            if any(
+                (
+                    synthetic.border_box,
+                    synthetic.border_top,
+                    synthetic.border_right,
+                    synthetic.border_bottom,
+                    synthetic.border_left,
+                )
+            ):
+                style = box.DOUBLE if synthetic.border_double else box.HEAVY if synthetic.border_thick else box.SQUARE
+                rendered = Panel(rendered, box=style, padding=0)
+        elif border:
+            rendered = Panel(rendered, box=box.DOUBLE if border.double else box.SQUARE, padding=0)
+        return rendered
 
 
 class TopicPopup(ModalScreen):
@@ -350,15 +500,21 @@ class TopicPopup(ModalScreen):
         Binding("tab", "next_link", "Next link", priority=True),
         Binding("shift+tab", "previous_link", "Previous link", priority=True),
         Binding("enter", "activate_link", "Open link", priority=True),
+        Binding("b,alt+left", "history_back", "Back"),
+        Binding("f,alt+right", "history_forward", "Forward"),
     ]
 
     def __init__(self, document: HelpDocument, topic: ParsedTopic):
         super().__init__()
         self.document = document
         self.topic = topic
+        self.back_stack: list[ParsedTopic] = []
+        self.forward_stack: list[ParsedTopic] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="popup"):
+            if self.title:
+                yield Label(str(self.title), classes="popup-title")
             yield VerticalScroll(
                 TopicView(self.document, self.topic, interactive=True, action_namespace="screen", id="popup-topic")
             )
@@ -385,13 +541,34 @@ class TopicPopup(ModalScreen):
 
     def _activate(self, target: ResolvedTarget) -> None:
         if target.topic is not None and target.kind in ("topic", "popup"):
+            if target.topic is not self.topic:
+                self.back_stack.append(self.topic)
+                self.forward_stack.clear()
             self.topic = target.topic
             self.query_one("#popup-topic", TopicView).set_topic(target.topic)
+        elif target.kind == "choice" and target.topics:
+            self.app.push_screen(TopicChoicePopup("Choose a topic", target.topics), self._topic_chosen)
         elif target.kind == "external":
             self.dismiss()
             self.app._activate_external_target(target)
         else:
             self.app.push_screen(DiagnosticPopup(target.detail or f"Unsupported target: {target.original}"))
+
+    def _topic_chosen(self, topic: Optional[ParsedTopic]) -> None:
+        if topic is not None:
+            self._activate(ResolvedTarget("topic", "choice", topic=topic, document=self.document))
+
+    def action_history_back(self) -> None:
+        if self.back_stack:
+            self.forward_stack.append(self.topic)
+            self.topic = self.back_stack.pop()
+            self.query_one("#popup-topic", TopicView).set_topic(self.topic)
+
+    def action_history_forward(self) -> None:
+        if self.forward_stack:
+            self.back_stack.append(self.topic)
+            self.topic = self.forward_stack.pop()
+            self.query_one("#popup-topic", TopicView).set_topic(self.topic)
 
 
 class DiagnosticPopup(ModalScreen):
@@ -428,6 +605,55 @@ class InformationPopup(ModalScreen):
         self.dismiss()
 
 
+class TopicChoiceList(ListView):
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            self.screen.action_choose()
+
+
+class TopicChoicePopup(ModalScreen):
+    """Choose one of several topics associated with an index keyword."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("q", "dismiss", "Close"),
+        Binding("enter", "choose", "Open", priority=True),
+    ]
+
+    def __init__(self, label: str, topics: tuple[ParsedTopic, ...]):
+        super().__init__()
+        self.label = label
+        self.topics = topics
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="popup"):
+            yield Label(self.label, classes="popup-title")
+            yield TopicChoiceList(
+                *(ListItem(Label(topic.title or f"Topic {topic.topic_number}")) for topic in self.topics),
+                id="topic-choices",
+            )
+            yield Label("Enter: open · Esc: close", id="popup-hint")
+
+    def on_mount(self) -> None:
+        choices = self.query_one("#topic-choices", ListView)
+        choices.index = 0
+        choices.focus()
+
+    @on(ListView.Selected, "#topic-choices")
+    def topic_selected(self, event: ListView.Selected) -> None:
+        if event.list_view.index is not None:
+            self.dismiss(self.topics[event.list_view.index])
+
+    def action_dismiss(self) -> None:
+        self.dismiss(None)
+
+    def action_choose(self) -> None:
+        index = self.query_one("#topic-choices", ListView).index
+        if index is not None:
+            self.dismiss(self.topics[index])
+
+
 class WinHlpApp(App):
     """Browse a parsed Windows Help file in the terminal."""
 
@@ -448,13 +674,7 @@ class WinHlpApp(App):
         background: $surface;
         color: $text;
     }
-    #topic-view { width: 1fr; height: auto; background: $surface; color: $text; }
-    TopicView {
-        link-color: $accent;
-        link-color-hover: $accent-lighten-2;
-        link-style: underline;
-        link-style-hover: bold underline;
-    }
+    #topic-view, #fixed-header { width: 1fr; height: auto; background: $surface; color: $text; }
     TopicPopup, DiagnosticPopup { align: center middle; background: $background 70%; }
     #popup, #diagnostic { width: 80%; height: 80%; padding: 1 2; border: heavy $accent; background: $surface; }
     #diagnostic { height: auto; max-height: 16; }
@@ -479,7 +699,7 @@ class WinHlpApp(App):
         Binding("e", "parse_errors", "Errors"),
         Binding("tab", "next_link", "Next link", priority=True),
         Binding("shift+tab", "previous_link", "Previous link", priority=True),
-        Binding("enter", "activate_link", "Open link", priority=True),
+        Binding("enter", "activate_link", "Open link"),
     ]
 
     def __init__(self, helpfile):
@@ -507,7 +727,7 @@ class WinHlpApp(App):
                 yield Input(placeholder="Search topics…", id="search")
                 yield ListView(*self._topic_items(self.sidebar_entries), id="topics")
             with Vertical(id="topic-pane"):
-                yield Static(id="fixed-header")
+                yield TopicView(self.document, self.navigator.current, id="fixed-header")
                 with VerticalScroll(id="topic-scroll"):
                     yield TopicView(self.document, self.navigator.current, id="topic-view")
         yield Footer()
@@ -515,7 +735,7 @@ class WinHlpApp(App):
     def on_mount(self) -> None:
         self._update_subtitle()
         self._show_current()
-        self.query_one(TopicView).focus()
+        self.query_one("#topic-view", TopicView).focus()
 
     @staticmethod
     def _topic_items(entries) -> list[ListItem]:
@@ -523,51 +743,24 @@ class WinHlpApp(App):
 
     def _show_current(self) -> None:
         topic = self.navigator.current
-        fixed_count, fixed_text = self._fixed_topic_header(topic)
-        fixed = self.query_one("#fixed-header", Static)
-        fixed.display = bool(fixed_text)
-        fixed.update(fixed_text)
+        layout = layout_topic(topic) if topic is not None else None
+        fixed = self.query_one("#fixed-header", TopicView)
+        fixed.document = self.document
+        fixed.target_base = 0
+        fixed.show_heading = True
+        fixed.display = bool(layout and layout.fixed_blocks)
+        fixed.set_topic(topic if fixed.display else None)
+        fixed.blocks = layout.fixed_blocks if layout else ()
+        fixed.refresh_topic()
         view = self.query_one("#topic-view", TopicView)
         view.document = self.document
-        view.start_block = fixed_count
-        view.show_heading = not fixed_text
+        view.target_base = len(fixed.targets)
+        view.show_heading = not fixed.display
         view.set_topic(topic)
+        view.blocks = layout.scrolling_blocks if layout else ()
+        view.refresh_topic()
         self.query_one("#topic-scroll", VerticalScroll).scroll_home(animate=False)
         self._update_subtitle()
-
-    @staticmethod
-    def _fixed_topic_header(topic: Optional[ParsedTopic]) -> tuple[int, Text]:
-        """Approximate WinHelp's non-scrolling region from paragraph offsets."""
-        if topic is None or topic.non_scroll_offset is None or topic.topic_offset is None:
-            return 0, Text()
-        if topic.non_scroll_offset <= topic.topic_offset:
-            return 0, Text()
-        offset = topic.topic_offset
-        count = 0
-        body = Text()
-        has_links = False
-        for block in topic.content_blocks:
-            if offset >= topic.non_scroll_offset:
-                break
-            if isinstance(block, TopicTextBlock):
-                for span in block.text_spans:
-                    body.append(_span_text(span), _span_style(span))
-                    has_links = has_links or bool(span.hyperlink_target)
-                has_links = has_links or bool(block.hotspot_mappings)
-                length = block.paragraph_info.topic_length if block.paragraph_info else 0
-            else:
-                body.append("[table]\n", style="dim")
-                length = 0
-            count += 1
-            offset += max(length, 1)
-        # Keep interactive fixed-region content in the main TopicView until a
-        # future composite view can share one keyboard target list.
-        if not count or has_links:
-            return 0, Text()
-        heading = Text(topic.title or "Untitled topic", style="bold")
-        heading.append("\n")
-        heading.append_text(body)
-        return count, heading
 
     def _update_subtitle(self) -> None:
         current = self.navigator.current
@@ -579,9 +772,15 @@ class WinHlpApp(App):
         self.sub_title = f"{os.path.basename(self.helpfile.filepath)} · {position}/{len(self.document.topics)}{warning}"
 
     def action_follow_link(self, index: int) -> None:
-        view = self.query_one("#topic-view", TopicView)
-        if 0 <= index < len(view.targets):
-            self._activate_target(view.targets[index])
+        targets = self._all_targets()
+        if 0 <= index < len(targets):
+            self._activate_target(targets[index])
+
+    def _all_targets(self) -> list[ResolvedTarget]:
+        return [
+            *self.query_one("#fixed-header", TopicView).targets,
+            *self.query_one("#topic-view", TopicView).targets,
+        ]
 
     def _activate_target(self, target: ResolvedTarget) -> None:
         if target.kind == "topic" and target.topic is not None:
@@ -589,12 +788,16 @@ class WinHlpApp(App):
             self._show_current()
         elif target.kind == "popup" and target.topic is not None:
             self.push_screen(TopicPopup(self.document, target.topic))
+        elif target.kind == "choice" and target.topics:
+            self.push_screen(TopicChoicePopup("Choose a topic", target.topics), self._topic_chosen)
         elif target.kind == "external":
             self._activate_external_target(target)
         else:
             self.push_screen(DiagnosticPopup(target.detail or f"Unsupported target: {target.original}"))
 
     def _activate_external_target(self, target: ResolvedTarget) -> None:
+        source_document = target.document if isinstance(target.document, HelpDocument) else self.document
+        source_helpfile = source_document.helpfile
         fields = {}
         for field in target.original.split("|"):
             key, separator, value = field.partition(":")
@@ -607,18 +810,30 @@ class WinHlpApp(App):
 
         filename = fields.get("file")
         if not filename:
-            topic = self.document.topic_for_offset(offset)
+            topic = (
+                source_document.topic_by_context_name(fields["context_name"])
+                if fields.get("context_name")
+                else source_document.topic_for_offset(offset)
+            )
             if topic is not None:
+                fields = self._with_viola_window(source_helpfile, topic, fields)
                 if target.open_as_popup or "window" in fields or "window_number" in fields:
-                    self.push_screen(TopicPopup(self.document, topic))
+                    popup = TopicPopup(source_document, topic)
+                    popup.title = self._window_caption(source_helpfile, fields)
+                    self.push_screen(popup)
                 else:
-                    self.navigator.go_to(topic)
-                    self._show_current()
+                    if source_document is self.document:
+                        self.navigator.go_to(topic)
+                        self._show_current()
+                    else:
+                        self.document_back_stack.append((self.helpfile, self.document, self.navigator))
+                        self.document_forward_stack.clear()
+                        self._switch_document(source_helpfile, source_document, HelpNavigator(source_document, topic))
                 return
             self.push_screen(DiagnosticPopup(target.detail or f"Could not resolve target: {target.original}"))
             return
 
-        candidate = self._sibling_help_path(filename)
+        candidate = self._sibling_help_path(filename, source_helpfile)
         if candidate is None:
             self.push_screen(DiagnosticPopup(f"Sibling help file was not found: {filename}"))
             return
@@ -628,21 +843,30 @@ class WinHlpApp(App):
         except Exception as error:
             self.push_screen(DiagnosticPopup(f"Could not open {candidate.name}: {error}"))
             return
-        topic = document.topic_for_offset(offset) if offset is not None else document.initial_topic
+        topic = (
+            document.topic_by_context_name(fields["context_name"])
+            if fields.get("context_name")
+            else document.topic_for_offset(offset)
+            if offset is not None
+            else document.initial_topic
+        )
         if topic is None:
             self.push_screen(DiagnosticPopup(f"{candidate.name} does not contain the requested topic."))
             return
+        fields = self._with_viola_window(helpfile, topic, fields)
         if target.open_as_popup or "window" in fields or "window_number" in fields:
-            self.push_screen(TopicPopup(document, topic))
+            popup = TopicPopup(document, topic)
+            popup.title = self._window_caption(helpfile, fields)
+            self.push_screen(popup)
             return
         self.document_back_stack.append((self.helpfile, self.document, self.navigator))
         self.document_forward_stack.clear()
         self._switch_document(helpfile, document, HelpNavigator(document, topic))
 
-    def _sibling_help_path(self, filename: str) -> Optional[Path]:
+    def _sibling_help_path(self, filename: str, source_helpfile: Optional[HelpFile] = None) -> Optional[Path]:
         """Find a named sibling HLP without allowing the target to escape its directory."""
         requested = Path(filename.replace("\\", "/")).name
-        directory = Path(self.helpfile.filepath).resolve().parent
+        directory = Path((source_helpfile or self.helpfile).filepath).resolve().parent
         exact = directory / requested
         if exact.is_file():
             return exact
@@ -651,6 +875,32 @@ class WinHlpApp(App):
             return next(path for path in directory.iterdir() if path.is_file() and path.name.casefold() == folded)
         except (OSError, StopIteration):
             return None
+
+    @staticmethod
+    def _window_caption(helpfile: HelpFile, fields: dict[str, str]) -> str:
+        system = helpfile.system
+        records = [
+            record.get("window_info")
+            for record in (system.records if system else [])
+            if isinstance(record, dict) and record.get("type") == "WINDOW"
+        ]
+        requested_name = fields.get("window")
+        requested_number = fields.get("window_number")
+        for index, info in enumerate(info for info in records if info):
+            if (requested_name and info.get("name", "").casefold() == requested_name.casefold()) or (
+                requested_number is not None and str(index) == requested_number
+            ):
+                return info.get("caption") or info.get("name") or "Secondary Help Window"
+        return "Secondary Help Window"
+
+    @staticmethod
+    def _with_viola_window(helpfile: HelpFile, topic: ParsedTopic, fields: dict[str, str]) -> dict[str, str]:
+        if "window" in fields or "window_number" in fields or helpfile.viola is None:
+            return fields
+        for entry in helpfile.viola.entries:
+            if entry.topic_offset == topic.topic_offset:
+                return {**fields, "window_number": str(entry.window_number)}
+        return fields
 
     def _switch_document(self, helpfile: HelpFile, document: HelpDocument, navigator: HelpNavigator) -> None:
         self.helpfile = helpfile
@@ -672,10 +922,30 @@ class WinHlpApp(App):
         if self.focused is self.query_one("#search", Input):
             self.query_one("#topics", ListView).focus()
             return
-        self.query_one("#topic-view", TopicView).select_next_link(1)
+        self._select_link(1)
 
     def action_previous_link(self) -> None:
-        self.query_one("#topic-view", TopicView).select_next_link(-1)
+        self._select_link(-1)
+
+    def _select_link(self, direction: int) -> None:
+        targets = self._all_targets()
+        if not targets:
+            return
+        fixed = self.query_one("#fixed-header", TopicView)
+        scrolling = self.query_one("#topic-view", TopicView)
+        current = max(fixed.selected_link, scrolling.selected_link)
+        selected = (current + direction) % len(targets) if current >= 0 else (0 if direction > 0 else len(targets) - 1)
+        fixed.selected_link = selected
+        scrolling.selected_link = selected
+        fixed.refresh_topic()
+        scrolling.refresh_topic()
+        (fixed if selected < len(fixed.targets) else scrolling).focus()
+        if selected >= len(fixed.targets):
+            local = selected - len(fixed.targets)
+            if local < len(scrolling.target_lines):
+                self.query_one("#topic-scroll", VerticalScroll).scroll_to(
+                    y=max(0, scrolling.target_lines[local] - 2), animate=False
+                )
 
     def action_activate_link(self) -> None:
         if self.focused is self.query_one("#search", Input):
@@ -684,7 +954,9 @@ class WinHlpApp(App):
                 self._show_current()
                 self.query_one("#topic-view", TopicView).focus()
             return
-        target = self.query_one("#topic-view", TopicView).selected_target()
+        fixed = self.query_one("#fixed-header", TopicView)
+        scrolling = self.query_one("#topic-view", TopicView)
+        target = fixed.selected_target() or scrolling.selected_target()
         if target is not None:
             self._activate_target(target)
 
@@ -760,25 +1032,56 @@ class WinHlpApp(App):
 
     def action_file_information(self) -> None:
         system = self.helpfile.system
+        header = self.helpfile.header
         lines = [
             f"File: {self.helpfile.filepath}",
+            f"File size: {len(self.helpfile.data):,} bytes",
             f"Title: {help_title(self.helpfile)}",
             f"Topics: {len(self.document.topics)}",
-            f"Format: {system.header.major}.{system.header.minor}" if system and system.header else "Format: unknown",
+            f"Format: {_format_version(system)}",
             f"Encoding: {system.encoding}" if system else "Encoding: unknown",
-            f"LCID: {system.lcid:#06x}" if system and system.lcid is not None else "LCID: unavailable",
-            f"Charset: {system.charset}" if system and system.charset is not None else "Charset: unavailable",
-            f"Compression flags: {system.header.flags:#06x}" if system and system.header else "",
-            f"Generated: {system.header.gen_date}" if system and system.header else "",
+            f"Locale: {_format_locale(system)}",
+            f"Charset: {_format_charset(system)}",
+            f"Compression: {_format_compression(system)}",
+            f"Generated: {_format_generation_date(system)}",
             f"Copyright: {system.copyright}" if system and system.copyright else "",
+            f"Container size: {header.entire_file_size:,}" if header else "",
+            f"Directory offset: {header.directory_start:#x}" if header else "",
+            f"Free-chain offset: {header.free_chain_start:#x}" if header else "",
             f"Internal files: {len(self.helpfile.directory.files) if self.helpfile.directory else 0}",
             f"Parsed with warnings: {len(self.helpfile.parse_errors)}",
         ]
         if system:
+            citation = next(
+                (
+                    record.get("citation_text")
+                    for record in system.records
+                    if isinstance(record, dict) and record.get("type") == "CITATION"
+                ),
+                None,
+            )
+            lines.extend(
+                line
+                for line in (
+                    f"Citation: {citation}" if citation else "",
+                    f"CNT file: {system.cnt_filename}" if system.cnt_filename else "",
+                    f"Icon: {len(system.icon):,} bytes" if system.icon else "",
+                    f"Default font: {_system_record_summary(system, 'DEFFONT')}",
+                    f"DLL mappings: {len(system.dllmaps)}" if system.dllmaps else "",
+                    f"Groups: {len(system.groups)}" if system.groups else "",
+                )
+                if line
+            )
             window_records = [
                 record for record in system.records if isinstance(record, dict) and record.get("type") == "WINDOW"
             ]
             lines.append(f"Window definitions: {len(window_records)}")
+            for index, record in enumerate(window_records):
+                info = record.get("window_info", {})
+                lines.append(
+                    f"  [{index}] {info.get('name') or '(unnamed)'}: "
+                    f"{info.get('caption') or '(no caption)'} ({info.get('window_type', 'unknown')})"
+                )
         if self.helpfile.gmacros:
             lines.append("\nGlobal macros:")
             for macro in self.helpfile.gmacros.entries:
@@ -795,7 +1098,29 @@ class WinHlpApp(App):
             lines.extend(f"  {macro} [{title}]" for _, macro, title in definitions)
         if self.helpfile.directory and self.helpfile.directory.files:
             lines.append("\nInternal files:")
-            lines.extend(f"  {name}" for name in sorted(self.helpfile.directory.files))
+            for name, offset in sorted(self.helpfile.directory.files.items()):
+                status = "parsed"
+                if any(error.get("file") == name for error in self.helpfile.parse_errors):
+                    status = "warning"
+                try:
+                    _reserved, used, _flags = struct.unpack_from("<llB", self.helpfile.data, offset)
+                    size = f"{used:,} bytes"
+                except struct.error:
+                    size = "truncated"
+                lines.append(f"  {name}: {size} [{status}]")
+        if self.helpfile.is_gid_file:
+            lines.append("\nGID diagnostics:")
+            lines.append(
+                f"  WinPos: {'parsed' if self.helpfile.winpos and self.helpfile.winpos.btree else 'unavailable'}"
+            )
+            lines.append(
+                f"  CntJump entries: {len(self.helpfile.cntjump.jump_references) if self.helpfile.cntjump else 0}"
+            )
+            lines.append(
+                f"  CntText entries: {len(self.helpfile.cnttext.topic_titles) if self.helpfile.cnttext else 0}"
+            )
+            lines.append(f"  Pete bytes: {len(self.helpfile.pete.raw_data) if self.helpfile.pete else 0}")
+            lines.append(f"  Flags bytes: {len(self.helpfile.flags.raw_data) if self.helpfile.flags else 0}")
         if self.helpfile.parse_errors:
             lines.append("\nInternal-file diagnostics:")
             lines.extend(
@@ -807,6 +1132,40 @@ class WinHlpApp(App):
         topic = self.navigator.current
         if topic is None:
             return
+        links = []
+        resources = []
+        unresolved = []
+        for block in topic.content_blocks:
+            spans = (
+                block.text_spans
+                if isinstance(block, TopicTextBlock)
+                else [span for row in block.table.rows for cell in row.cells for span in cell.text_spans]
+            )
+            for span in spans:
+                if span.hyperlink_target:
+                    links.append(span.hyperlink_target)
+                    resolved = self.document.resolve_target(span.hyperlink_target)
+                    if resolved.kind == "unresolved":
+                        unresolved.append(span.hyperlink_target)
+                if span.embedded_image:
+                    resources.append(span.embedded_image)
+        for mapping in topic.hotspot_mappings:
+            links.append(mapping.target)
+            if self.document.resolve_hotspot(mapping).kind == "unresolved":
+                unresolved.append(mapping.target)
+        petra_source = self.helpfile.petra.get_rtf_filename(topic.topic_offset) if self.helpfile.petra else None
+        groups = [
+            f"{name}:{group.get_group_for_topic(topic.topic_number)}"
+            for name, group in self.helpfile.grp_files.items()
+            if topic.topic_number is not None and group.get_group_for_topic(topic.topic_number) is not None
+        ]
+        viola = [
+            entry.window_number
+            for entry in (self.helpfile.viola.entries if self.helpfile.viola else [])
+            if entry.topic_offset == topic.topic_offset
+        ]
+        browse_previous = self.document.browse_previous(topic)
+        browse_next = self.document.browse_next(topic)
         lines = [
             f"Title: {topic.title or '(untitled)'}",
             f"Topic number: {topic.topic_number}",
@@ -815,8 +1174,38 @@ class WinHlpApp(App):
             "Context IDs: " + (", ".join(topic.context_names) or "(none)"),
             "Keywords: " + (", ".join(topic.keywords) or "(none)"),
             "Entry macros: " + (", ".join(topic.entry_macros) or "(none)"),
-            "Annotations: " + (str(len(topic.annotations))),
+            f"Browse previous: {browse_previous.title if browse_previous else '(none)'}",
+            f"Browse next: {browse_next.title if browse_next else '(none)'}",
+            f"Source RTF: {petra_source or '(unknown)'}",
+            f"Groups: {', '.join(groups) or '(none)'}",
+            f"Window assignments: {', '.join(map(str, viola)) or '(none)'}",
+            f"Blocks: {len(topic.content_blocks)} ({len(topic.tables)} tables)",
+            "Links: " + (", ".join(dict.fromkeys(links)) or "(none)"),
+            "Embedded resources: " + (", ".join(dict.fromkeys(resources)) or "(none)"),
+            "Unresolved targets: " + (", ".join(dict.fromkeys(unresolved)) or "(none)"),
+            f"Annotations ({len(topic.annotations)}):",
+            *(f"  {annotation}" for annotation in topic.annotations),
         ]
+        if resources:
+            lines.append("Resource details:")
+            for marker in dict.fromkeys(resources):
+                resource = parse_embedded_resource(marker)
+                bitmap = self.helpfile.bitmaps.get(resource.resource_name) if resource else None
+                if bitmap is None and resource:
+                    bitmap = self.helpfile.bitmaps.get("|" + resource.resource_name.lstrip("|"))
+                lines.append(
+                    f"  {marker}: "
+                    f"{len(bitmap.bitmaps) if bitmap else 0} picture(s), "
+                    f"{sum(len(picture.hotspots) for picture in bitmap.bitmaps) if bitmap else 0} hotspot(s)"
+                )
+        local_errors = [
+            error
+            for error in self.helpfile.parse_errors
+            if str(topic.topic_offset) in str(error) or (topic.title and topic.title in str(error))
+        ]
+        if local_errors:
+            lines.append("Local diagnostics:")
+            lines.extend(f"  {error.get('file', 'unknown')}: {error.get('error', error)}" for error in local_errors)
         self.push_screen(InformationPopup("Topic Details", Text("\n".join(lines))))
 
     def action_parse_errors(self) -> None:
@@ -849,14 +1238,103 @@ class WinHlpApp(App):
     def topic_selected(self, event: ListView.Selected) -> None:
         if event.list_view.index is None or event.list_view.index >= len(self.sidebar_entries):
             return
-        topic = self.sidebar_entries[event.list_view.index].topic
+        entry = self.sidebar_entries[event.list_view.index]
+        if len(entry.topics) > 1:
+            self.push_screen(TopicChoicePopup(entry.label, entry.topics), self._topic_chosen)
+            return
+        if entry.macro:
+            self._activate_target(self.document.resolve_target(f"macro:{entry.macro}"))
+            return
+        topic = entry.topic or (entry.topics[0] if entry.topics else None)
         if topic is None:
+            if entry.kind == "unresolved":
+                self.push_screen(DiagnosticPopup(f"Could not resolve Contents target: {entry.target or entry.label}"))
             return
         self.navigator.go_to(topic)
         self._show_current()
         self.query_one("#topic-view", TopicView).focus()
 
+    def _topic_chosen(self, topic: Optional[ParsedTopic]) -> None:
+        if topic is not None:
+            self.navigator.go_to(topic)
+            self._show_current()
+            self.query_one("#topic-view", TopicView).focus()
+
 
 def run_tui(helpfile) -> None:
     """Run the terminal viewer for a parsed HelpFile."""
     WinHlpApp(helpfile).run()
+
+
+def _format_version(system) -> str:
+    if not system or not system.header:
+        return "unknown"
+    minor = system.header.minor
+    family = (
+        "WinHelp 3.0"
+        if minor <= 16
+        else "WinHelp 3.1"
+        if minor <= 21
+        else "Multimedia Viewer"
+        if minor == 27
+        else "WinHelp 4.0"
+        if minor >= 33
+        else "WinHelp"
+    )
+    return f"{family} ({system.header.major}.{minor})"
+
+
+def _format_locale(system) -> str:
+    if not system or system.lcid is None:
+        return "unavailable"
+    name = locale.windows_locale.get(system.lcid, "unknown locale")
+    return f"{name} ({system.lcid:#06x})"
+
+
+def _format_charset(system) -> str:
+    if not system or system.charset is None:
+        return "unavailable"
+    names = {
+        0: "ANSI",
+        1: "Default",
+        2: "Symbol",
+        77: "Mac",
+        128: "Shift-JIS",
+        129: "Hangul",
+        134: "GB2312",
+        136: "Big5",
+        161: "Greek",
+        162: "Turkish",
+        177: "Hebrew",
+        178: "Arabic",
+        186: "Baltic",
+        204: "Cyrillic",
+        222: "Thai",
+        238: "Eastern European",
+    }
+    return f"{names.get(system.charset, 'unknown')} ({system.charset})"
+
+
+def _format_compression(system) -> str:
+    if not system or not system.header:
+        return "unknown"
+    flags = system.header.flags
+    names = {0: "uncompressed, 4 KiB topic blocks", 4: "LZ77, 4 KiB topic blocks", 8: "LZ77, 2 KiB topic blocks"}
+    return f"{names.get(flags, 'unknown')} (flags {flags:#06x})"
+
+
+def _format_generation_date(system) -> str:
+    if not system or not system.header or not system.header.gen_date:
+        return "unavailable"
+    try:
+        return datetime.fromtimestamp(system.header.gen_date).isoformat(sep=" ")
+    except (OverflowError, ValueError):
+        return f"invalid ({system.header.gen_date})"
+
+
+def _system_record_summary(system, record_type: str) -> str:
+    for record in system.records:
+        if isinstance(record, dict) and record.get("type") == record_type:
+            parsed = record.get("raw_data", {}).get("parsed", {})
+            return ", ".join(f"{key}={value}" for key, value in parsed.items()) or "present"
+    return "unavailable"
