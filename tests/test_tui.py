@@ -3,6 +3,7 @@
 import os
 import shutil
 from io import StringIO
+from types import SimpleNamespace
 
 import pytest
 from rich.console import Console
@@ -55,6 +56,7 @@ async def test_startup_opens_help_topics_and_palette_command_reopens_it():
         await pilot.pause()
         assert isinstance(app.screen, HelpTopicsScreen)
         assert app.screen.mode == "contents"
+        assert app.screen.show_all_topics
 
         await pilot.press("escape")
         commands = list(app.get_system_commands(app.screen))
@@ -268,20 +270,33 @@ async def test_contents_index_information_and_diagnostics_views():
 @pytest.mark.asyncio
 async def test_help_topics_contents_selection_opens_topic():
     app = WinHlpApp(HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")), show_help_topics_on_start=False)
+    target = app.document.topics[1]
+    app.document.cnt = SimpleNamespace(
+        entries=[
+            SimpleNamespace(
+                label=target.title,
+                reference=target.context_names[0],
+                level=0,
+                kind="topic",
+            )
+        ],
+        indices=[],
+    )
 
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.press("c")
         await pilot.pause()
         screen = app.screen
         assert isinstance(screen, HelpTopicsScreen)
-        index = next(index for index, entry in enumerate(screen.entries) if entry.topic is app.document.topics[1])
+        assert not screen.show_all_topics
+        index = next(index for index, entry in enumerate(screen.entries) if entry.topic is target)
         screen.query_one("#help-entries", ListView).index = index
 
         await pilot.press("enter")
         await pilot.pause()
 
         assert not isinstance(app.screen, HelpTopicsScreen)
-        assert app.navigator.current is app.document.topics[1]
+        assert app.navigator.current is target
 
 
 @pytest.mark.asyncio

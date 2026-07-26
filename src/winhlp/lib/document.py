@@ -161,6 +161,14 @@ class HelpDocument:
             return list(self.topics)
         return [topic for topic in self.topics if all(term in self._search_text[id(topic)] for term in terms)]
 
+    @property
+    def has_authored_contents(self) -> bool:
+        """Whether a CNT/GID source supplies a curated Contents hierarchy."""
+        return bool(
+            (self.cnt and self.cnt.entries)
+            or (getattr(self.helpfile, "cnttext", None) and getattr(self.helpfile.cnttext, "topic_titles", None))
+        )
+
     def contents_entries(self) -> list[NavigationEntry]:
         if self.cnt and self.cnt.entries:
             entries = []

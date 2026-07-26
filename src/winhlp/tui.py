@@ -24,7 +24,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static, Tab, Tabs
+from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, ListItem, ListView, Static, Tab, Tabs
 
 from .lib.document import (
     HelpDocument,
@@ -766,6 +766,7 @@ class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
     """Windows Help-style Contents and keyword Index browser."""
 
     INDEX_BROWSE_LIMIT = 400
+    TOPIC_BROWSE_LIMIT = 400
 
     BINDINGS = [
         Binding("escape", "dismiss", "Close"),
@@ -777,6 +778,7 @@ class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
         super().__init__()
         self.document = document
         self.mode = initial if initial in ("contents", "index") else "contents"
+        self.show_all_topics = not document.has_authored_contents
         self.all_entries: list[NavigationEntry] = []
         self.entries: list[NavigationEntry] = []
 
@@ -790,6 +792,12 @@ class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
                 id="help-tabs",
             )
             yield Label("", id="help-instructions")
+            yield Checkbox(
+                "Show all internal topics",
+                value=self.show_all_topics,
+                id="help-show-all",
+                compact=True,
+            )
             yield Input(placeholder="Type the first few letters of the word…", id="help-index-search")
             yield ListView(id="help-entries")
             yield Label("Enter: display · Esc: close", id="popup-hint")
@@ -799,16 +807,20 @@ class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
 
     @on(Tabs.TabActivated, "#help-tabs")
     def tab_activated(self, event: Tabs.TabActivated) -> None:
-        if event.tab.id:
+        if event.tab.id and event.tab.id != self.mode:
+            self.query_one("#help-index-search", Input).value = ""
             self._set_mode(event.tab.id)
 
     def _set_mode(self, mode: str) -> None:
         self.mode = mode
         search = self.query_one("#help-index-search", Input)
+        show_all = self.query_one("#help-show-all", Checkbox)
         instructions = self.query_one("#help-instructions", Label)
         if mode == "index":
+            show_all.display = False
             self.all_entries = self.document.index_entries()
             search.display = True
+            search.placeholder = "Type the first few letters of the word…"
             suffix = (
                 f" Showing the first {self.INDEX_BROWSE_LIMIT} until you type."
                 if len(self.all_entries) > self.INDEX_BROWSE_LIMIT
@@ -818,11 +830,25 @@ class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
             self._filter_index(search.value)
             search.focus()
         else:
-            self.all_entries = self.document.contents_entries()
-            search.display = False
-            instructions.update("Choose a book or topic, then press Enter.")
-            self.entries = list(self.all_entries)
-            self.run_worker(self._replace_entries(), group="help-entries", exclusive=True)
+            show_all.display = True
+            self._set_contents_entries(search.value)
+            if self.show_all_topics:
+                search.display = True
+                search.placeholder = "Filter internal topics…"
+                suffix = (
+                    f" Showing the first {self.TOPIC_BROWSE_LIMIT} until you filter."
+                    if len(self.all_entries) > self.TOPIC_BROWSE_LIMIT
+                    else ""
+                )
+                instructions.update("Showing internal topics. Type to filter, then press Enter." + suffix)
+                search.focus()
+            else:
+                search.display = False
+                instructions.update(
+                    "Choose a book or topic, then press Enter."
+                    if self.document.has_authored_contents
+                    else "No authored Contents file is available. Select Show all internal topics."
+                )
 
     def _entry_item(self, entry: NavigationEntry) -> ListItem:
         if self.mode == "contents":
@@ -853,10 +879,34 @@ class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
             )[: self.INDEX_BROWSE_LIMIT]
         self.run_worker(self._replace_entries(), group="help-entries", exclusive=True)
 
+    def _set_contents_entries(self, query: str = "") -> None:
+        if self.show_all_topics:
+            positions = {id(topic): index for index, topic in enumerate(self.document.topics)}
+            self.all_entries = [
+                NavigationEntry(topic_label(topic, positions[id(topic)]), topic) for topic in self.document.topics
+            ]
+            folded = query.casefold().strip()
+            matches = [entry for entry in self.all_entries if not folded or folded in entry.label.casefold()]
+            self.entries = matches[: self.TOPIC_BROWSE_LIMIT]
+        else:
+            self.all_entries = self.document.contents_entries() if self.document.has_authored_contents else []
+            self.entries = list(self.all_entries)
+        self.run_worker(self._replace_entries(), group="help-entries", exclusive=True)
+
+    @on(Checkbox.Changed, "#help-show-all")
+    def show_all_changed(self, event: Checkbox.Changed) -> None:
+        self.show_all_topics = event.value
+        if self.mode == "contents":
+            search = self.query_one("#help-index-search", Input)
+            search.value = ""
+            self._set_mode("contents")
+
     @on(Input.Changed, "#help-index-search")
     def index_changed(self, event: Input.Changed) -> None:
         if self.mode == "index":
             self._filter_index(event.value)
+        elif self.show_all_topics:
+            self._set_contents_entries(event.value)
 
     @on(Input.Submitted, "#help-index-search")
     def index_submitted(self) -> None:
