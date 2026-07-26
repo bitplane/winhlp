@@ -24,7 +24,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Footer, Header, Input, Label, ListItem, ListView, Static, Tab, Tabs
+from textual.widgets import Button, Footer, Header, Input, Label, ListItem, ListView, Static, Tab, Tabs
 
 from .lib.document import (
     HelpDocument,
@@ -879,11 +879,58 @@ class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
         self.dismiss(None)
 
 
+class OptionsScreen(ModalScreen[Optional[str]]):
+    """Compact menu for less-frequent WinHelp viewer actions."""
+
+    OPTIONS = (
+        ("topic_details", "Topic Details"),
+        ("file_information", "Help File Information"),
+        ("parse_errors", "Parser Diagnostics"),
+        ("change_theme", "Change Theme"),
+    )
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("q", "dismiss", "Close"),
+        Binding("enter", "choose", "Open", priority=True),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="options-menu"):
+            yield Label("Options", classes="popup-title")
+            yield ListView(
+                *(ListItem(Label(label)) for _action, label in self.OPTIONS),
+                id="option-entries",
+            )
+            yield Label("Enter: open · Esc: close", id="popup-hint")
+
+    def on_mount(self) -> None:
+        options = self.query_one("#option-entries", ListView)
+        options.index = 0
+        options.focus()
+
+    @on(ListView.Selected, "#option-entries")
+    def option_selected(self) -> None:
+        self.action_choose()
+
+    def action_choose(self) -> None:
+        index = self.query_one("#option-entries", ListView).index
+        if index is not None:
+            self.dismiss(self.OPTIONS[index][0])
+
+    def action_dismiss(self) -> None:
+        self.dismiss(None)
+
+
 class WinHlpApp(App):
     """Browse a parsed Windows Help file in the terminal."""
 
     CSS = """
     Screen { layout: vertical; background: $background; color: $text; }
+    #toolbar { height: 3; background: $panel; }
+    #toolbar Button { height: 3; min-width: 0; margin: 0; }
+    #toolbar-help { width: 13; }
+    #toolbar-back { width: 7; }
+    #toolbar-options { width: 9; }
     #body { height: 1fr; }
     #sidebar { display: none; width: 30; border-right: solid $primary; background: $panel; }
     #search { dock: top; }
@@ -900,13 +947,25 @@ class WinHlpApp(App):
         color: $text;
     }
     #topic-view, #fixed-header { width: 1fr; height: auto; background: $surface; color: $text; }
-    TopicPopup, DiagnosticPopup, HelpTopicsScreen { align: center middle; background: $background 70%; }
+    TopicPopup, DiagnosticPopup, HelpTopicsScreen, OptionsScreen {
+        align: center middle;
+        background: $background 70%;
+    }
     #popup, #diagnostic { width: 80%; height: 80%; padding: 1 2; border: heavy $accent; background: $surface; }
     #help-topics { width: 82%; height: 86%; padding: 1 2; border: heavy $primary; background: $panel; }
     #help-tabs { height: 3; }
     #help-instructions { height: 2; padding: 0 1; }
     #help-index-search { height: 3; }
     #help-entries { height: 1fr; background: $surface; }
+    #options-menu {
+        width: 42;
+        max-width: 94%;
+        height: 15;
+        padding: 1 2;
+        border: heavy $primary;
+        background: $panel;
+    }
+    #option-entries { height: 1fr; background: $surface; }
     #diagnostic { height: auto; max-height: 16; }
     #popup-hint { dock: bottom; height: 1; color: $text-muted; }
     .popup-title { height: 2; text-style: bold; color: $primary; }
@@ -915,18 +974,18 @@ class WinHlpApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
-        Binding("b,alt+left", "history_back", "Back"),
-        Binding("f,alt+right", "history_forward", "Forward"),
+        Binding("b,alt+left", "history_back", "Back", show=False),
+        Binding("f,alt+right", "history_forward", "Forward", show=False),
         Binding("[", "browse_previous", "Browse prev"),
         Binding("]", "browse_next", "Browse next"),
         Binding("/", "focus_search", "Search"),
         Binding("t", "toggle_sidebar", "Topics"),
-        Binding("o", "show_topics", "Topics list"),
-        Binding("c", "show_contents", "Contents"),
-        Binding("k", "show_index", "Index"),
-        Binding("i", "file_information", "File info"),
-        Binding("d", "topic_details", "Topic details"),
-        Binding("e", "parse_errors", "Errors"),
+        Binding("o", "show_topics", "Help Topics", show=False),
+        Binding("c", "show_contents", "Contents", show=False),
+        Binding("k", "show_index", "Index", show=False),
+        Binding("i", "file_information", "File info", show=False),
+        Binding("d", "topic_details", "Topic details", show=False),
+        Binding("e", "parse_errors", "Errors", show=False),
         Binding("tab", "next_link", "Next link", priority=True),
         Binding("shift+tab", "previous_link", "Previous link", priority=True),
         Binding("enter", "activate_link", "Open link"),
@@ -952,6 +1011,10 @@ class WinHlpApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        with Horizontal(id="toolbar"):
+            yield Button("Help Topics", id="toolbar-help", compact=True)
+            yield Button("Back", id="toolbar-back", compact=True, disabled=True)
+            yield Button("Options", id="toolbar-options", compact=True)
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
                 yield Label("Topics", id="sidebar-title")
@@ -978,6 +1041,18 @@ class WinHlpApp(App):
             self.action_show_topics,
         )
 
+    @on(Button.Pressed, "#toolbar-help")
+    def toolbar_help_pressed(self) -> None:
+        self.action_show_topics()
+
+    @on(Button.Pressed, "#toolbar-back")
+    def toolbar_back_pressed(self) -> None:
+        self.action_history_back()
+
+    @on(Button.Pressed, "#toolbar-options")
+    def toolbar_options_pressed(self) -> None:
+        self.action_show_options()
+
     @staticmethod
     def _topic_items(entries) -> list[ListItem]:
         return [ListItem(Label("  " * entry.level + entry.label)) for entry in entries]
@@ -1002,6 +1077,12 @@ class WinHlpApp(App):
         view.refresh_topic()
         self.query_one("#topic-scroll", VerticalScroll).scroll_home(animate=False)
         self._update_subtitle()
+        self._update_toolbar_state()
+
+    def _update_toolbar_state(self) -> None:
+        buttons = list(self.query("#toolbar-back"))
+        if buttons:
+            buttons[0].disabled = not bool(self.navigator.back_stack or self.document_back_stack)
 
     def _update_subtitle(self) -> None:
         current = self.navigator.current
@@ -1249,6 +1330,19 @@ class WinHlpApp(App):
 
     def action_show_index(self) -> None:
         self._show_help_topics("index")
+
+    def action_show_options(self) -> None:
+        self.push_screen(OptionsScreen(), self._option_chosen)
+
+    def _option_chosen(self, action: Optional[str]) -> None:
+        if action == "topic_details":
+            self.action_topic_details()
+        elif action == "file_information":
+            self.action_file_information()
+        elif action == "parse_errors":
+            self.action_parse_errors()
+        elif action == "change_theme":
+            self.action_change_theme()
 
     def _show_help_topics(self, initial: str) -> None:
         self.push_screen(HelpTopicsScreen(self.document, initial), self._help_entry_chosen)

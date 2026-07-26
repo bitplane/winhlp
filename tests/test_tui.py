@@ -23,6 +23,7 @@ from winhlp.tui import (
     DiagnosticPopup,
     HelpTopicsScreen,
     InformationPopup,
+    OptionsScreen,
     TopicChoicePopup,
     TopicPopup,
     TopicView,
@@ -62,6 +63,41 @@ async def test_startup_opens_help_topics_and_palette_command_reopens_it():
         await pilot.pause()
 
         assert isinstance(app.screen, HelpTopicsScreen)
+
+
+@pytest.mark.asyncio
+async def test_toolbar_help_back_and_options_actions():
+    app = WinHlpApp(
+        HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")),
+        show_help_topics_on_start=False,
+    )
+
+    async with app.run_test(size=(60, 25)) as pilot:
+        back = app.query_one("#toolbar-back")
+        assert back.disabled
+
+        original = app.navigator.current
+        app.navigator.go_to(app.document.topics[1])
+        app._show_current()
+        assert not back.disabled
+
+        await pilot.click("#toolbar-back")
+        await pilot.pause()
+        assert app.navigator.current is original
+        assert back.disabled
+
+        await pilot.click("#toolbar-help")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpTopicsScreen)
+        await pilot.press("escape")
+
+        await pilot.click("#toolbar-options")
+        await pilot.pause()
+        assert isinstance(app.screen, OptionsScreen)
+        app.screen.query_one("#option-entries", ListView).index = 1
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, InformationPopup)
 
 
 def test_terminal_font_approximations_preserve_semantics_without_source_colours():
@@ -430,3 +466,6 @@ async def test_narrow_terminal_and_resize_keep_topic_renderable():
 
         assert view.topic is app.document.topics[1]
         assert not view.image_placeholders
+        options = app.query_one("#toolbar-options")
+        assert options.region.width > 0
+        assert options.region.right <= 30
