@@ -130,12 +130,20 @@ class HelpDocument:
         """Resolve a link's explicitly typed reference in this document."""
         if fields.get("context_name"):
             return self.topic_by_context_name(fields["context_name"])
-        for kind in ("context_hash", "topic_offset"):
+        for kind in ("context_id", "context_hash", "topic_offset"):
             if kind in fields:
                 try:
                     value = int(fields[kind], 0)
                 except ValueError:
                     return None
+                if kind == "context_id":
+                    mapping = getattr(self.helpfile, "ctxomap", None)
+                    offset = (
+                        next((entry.topic_offset for entry in mapping.entries if entry.map_id == value), None)
+                        if mapping is not None
+                        else None
+                    )
+                    return self.topic_for_offset(offset)
                 offset = self._context_offset(value) if kind == "context_hash" else value
                 return self.topic_for_offset(offset)
         return self.initial_topic
@@ -409,7 +417,7 @@ class HelpDocument:
         if target.startswith("macro:"):
             macro = target[len("macro:") :]
             return self._resolve_navigation_macro(macro, original)
-        if target.startswith(("context_hash:", "topic_offset:", "file:", "window:", "window_number:")):
+        if target.startswith(("context_id:", "context_hash:", "topic_offset:", "file:", "window:", "window_number:")):
             return ResolvedTarget(
                 "external",
                 original,
@@ -473,7 +481,7 @@ class HelpDocument:
         if parsed.name == "jumpcontext" and arguments:
             filename = arguments[0] if len(arguments) > 1 else ""
             reference = arguments[1] if len(arguments) > 1 else arguments[0]
-            fields = [f"topic_offset:{reference}"]
+            fields = [f"context_id:{reference}"]
             if filename:
                 fields.append(f"file:{filename}")
             return ResolvedTarget("external", "|".join(fields), document=self)

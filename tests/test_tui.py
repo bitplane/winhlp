@@ -512,3 +512,36 @@ async def test_parsed_external_jump_resolves_destination_context_hash(tmp_path, 
         else:
             assert app.helpfile.filepath == str(sibling)
             assert app.navigator.current.title == "How to use SmartTop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["", "sibling.hlp"])
+@pytest.mark.parametrize("map_id", [42, 999])
+async def test_jumpcontext_resolves_map_ids_in_destination(tmp_path, monkeypatch, filename, map_id):
+    import struct
+    from winhlp.lib.internal_files.ctxomap import CtxoMapFile
+
+    fixture = os.path.join(DATA, "SMARTTOP.HLP")
+    sibling = tmp_path / "sibling.hlp"
+    shutil.copyfile(fixture, sibling)
+
+    def load_with_map(filepath):
+        helpfile = HelpFile(filepath=filepath)
+        intended = helpfile.get_document().resolve_target("topic:00000427").topic
+        helpfile.ctxomap = CtxoMapFile(filename="|CTXOMAP", raw_data=struct.pack("<Hll", 1, 42, intended.topic_offset))
+        return helpfile
+
+    monkeypatch.setattr("winhlp.tui.HelpFile", load_with_map)
+    source = load_with_map(fixture)
+    source.filepath = str(tmp_path / "source.hlp")
+    app = WinHlpApp(source, show_help_topics_on_start=False)
+    target = app.document.resolve_target(f'macro:JumpContext("{filename}", {map_id})')
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app._activate_target(target)
+        await pilot.pause()
+        if map_id == 999:
+            assert isinstance(app.screen, DiagnosticPopup)
+        else:
+            assert app.navigator.current.title == "How to use SmartTop"
+            assert app.helpfile.filepath == str(sibling if filename else tmp_path / "source.hlp")
