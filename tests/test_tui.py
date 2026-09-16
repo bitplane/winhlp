@@ -597,3 +597,74 @@ async def test_contents_selection_preserves_file_and_window(tmp_path, reference,
         else:
             assert app.helpfile.filepath == str(tmp_path / destination)
             assert app.navigator.current.title == "How to use SmartTop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["link", "entry", "choice", "search", "search_enter", "browse", "local_external"])
+async def test_new_local_navigation_clears_cross_file_forward_history(tmp_path, action):
+    from winhlp.lib.document import NavigationEntry
+
+    fixture = os.path.join(DATA, "SMARTTOP.HLP")
+    for filename in ("source.hlp", "sibling.hlp"):
+        shutil.copyfile(fixture, tmp_path / filename)
+    app = WinHlpApp(HelpFile(filepath=str(tmp_path / "source.hlp")), show_help_topics_on_start=False)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app._activate_target(ResolvedTarget("external", "context_hash:1063|file:sibling.hlp", document=app.document))
+        await pilot.pause()
+        app.action_history_back()
+        await pilot.pause()
+        assert app.document_forward_stack
+        # No-op selections must preserve Forward.
+        app._activate_target(ResolvedTarget("topic", "current", topic=app.navigator.current))
+        assert app.document_forward_stack
+        destination = app.document.topics[2]
+        if action == "link":
+            app._activate_target(ResolvedTarget("topic", "new", topic=destination))
+        elif action == "entry":
+            app._activate_navigation_entry(NavigationEntry("New topic", destination))
+        elif action == "choice":
+            app._topic_chosen(destination)
+        elif action in ("search", "search_enter"):
+            app.visible_topics = [destination]
+            if action == "search":
+                app.search_submitted()
+            else:
+                app.action_focus_search()
+                await pilot.pause()
+                app.action_activate_link()
+        elif action == "browse":
+            app.navigator.current.browse_next_topic = destination.topic_number
+            app.action_browse_next()
+        else:
+            app._activate_target(ResolvedTarget("external", f"topic_offset:{destination.topic_offset}"))
+        await pilot.pause()
+        assert app.navigator.current is destination
+        assert not app.document_forward_stack
+        assert not app.navigator.forward_stack
+        app.action_history_forward()
+        assert app.helpfile.filepath == str(tmp_path / "source.hlp")
+        assert app.navigator.current is destination
+
+
+@pytest.mark.asyncio
+async def test_new_cross_file_navigation_discards_old_local_forward_branch(tmp_path):
+    fixture = os.path.join(DATA, "SMARTTOP.HLP")
+    for filename in ("source.hlp", "sibling.hlp"):
+        shutil.copyfile(fixture, tmp_path / filename)
+    app = WinHlpApp(HelpFile(filepath=str(tmp_path / "source.hlp")), show_help_topics_on_start=False)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app._activate_target(ResolvedTarget("topic", "old branch", topic=app.document.topics[2]))
+        app.action_history_back()
+        assert app.navigator.forward_stack
+        app._activate_target(ResolvedTarget("external", "context_hash:1063|file:sibling.hlp", document=app.document))
+        await pilot.pause()
+        app.action_history_back()
+        await pilot.pause()
+        assert not app.navigator.forward_stack
+        assert app.document_forward_stack
+        app.action_history_forward()
+        await pilot.pause()
+        assert app.helpfile.filepath == str(tmp_path / "sibling.hlp")
+        assert app.navigator.current.title == "How to use SmartTop"

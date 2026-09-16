@@ -1154,9 +1154,18 @@ class WinHlpApp(App):
             *self.query_one("#topic-view", TopicView).targets,
         ]
 
+    def _discard_forward_history(self) -> None:
+        self.navigator.forward_stack.clear()
+        self.document_forward_stack.clear()
+
+    def _go_to_topic(self, topic: Optional[ParsedTopic]) -> None:
+        if topic is not None and topic is not self.navigator.current:
+            self._discard_forward_history()
+            self.navigator.go_to(topic)
+
     def _activate_target(self, target: ResolvedTarget) -> None:
         if target.kind == "topic" and target.topic is not None:
-            self.navigator.go_to(target.topic)
+            self._go_to_topic(target.topic)
             self._show_current()
         elif target.kind == "popup" and target.topic is not None:
             self.push_screen(TopicPopup(self.document, target.topic))
@@ -1186,11 +1195,11 @@ class WinHlpApp(App):
                     self.push_screen(popup)
                 else:
                     if source_document is self.document:
-                        self.navigator.go_to(topic)
+                        self._go_to_topic(topic)
                         self._show_current()
                     else:
                         self.document_back_stack.append((self.helpfile, self.document, self.navigator))
-                        self.document_forward_stack.clear()
+                        self._discard_forward_history()
                         self._switch_document(source_helpfile, source_document, HelpNavigator(source_document, topic))
                 return
             self.push_screen(DiagnosticPopup(target.detail or f"Could not resolve target: {target.original}"))
@@ -1217,7 +1226,7 @@ class WinHlpApp(App):
             self.push_screen(popup)
             return
         self.document_back_stack.append((self.helpfile, self.document, self.navigator))
-        self.document_forward_stack.clear()
+        self._discard_forward_history()
         self._switch_document(helpfile, document, HelpNavigator(document, topic))
 
     def _sibling_help_path(self, filename: str, source_helpfile: Optional[HelpFile] = None) -> Optional[Path]:
@@ -1307,7 +1316,7 @@ class WinHlpApp(App):
     def action_activate_link(self) -> None:
         if self.focused is self.query_one("#search", Input):
             if self.visible_topics:
-                self.navigator.go_to(self.visible_topics[0])
+                self._go_to_topic(self.visible_topics[0])
                 self._show_current()
                 self.query_one("#topic-view", TopicView).focus()
             return
@@ -1339,13 +1348,15 @@ class WinHlpApp(App):
 
     def action_browse_previous(self) -> None:
         current = self.navigator.current
-        self.navigator.browse_previous()
+        if current is not None:
+            self._go_to_topic(self.document.browse_previous(current))
         if self.navigator.current is not current:
             self._show_current()
 
     def action_browse_next(self) -> None:
         current = self.navigator.current
-        self.navigator.browse_next()
+        if current is not None:
+            self._go_to_topic(self.document.browse_next(current))
         if self.navigator.current is not current:
             self._show_current()
 
@@ -1608,7 +1619,7 @@ class WinHlpApp(App):
     @on(Input.Submitted, "#search")
     def search_submitted(self) -> None:
         if self.visible_topics:
-            self.navigator.go_to(self.visible_topics[0])
+            self._go_to_topic(self.visible_topics[0])
             self._show_current()
             self.query_one("#topic-view", TopicView).focus()
 
@@ -1633,13 +1644,13 @@ class WinHlpApp(App):
             if entry.kind == "unresolved":
                 self.push_screen(DiagnosticPopup(f"Could not resolve Help target: {entry.target or entry.label}"))
             return
-        self.navigator.go_to(topic)
+        self._go_to_topic(topic)
         self._show_current()
         self.query_one("#topic-view", TopicView).focus()
 
     def _topic_chosen(self, topic: Optional[ParsedTopic]) -> None:
         if topic is not None:
-            self.navigator.go_to(topic)
+            self._go_to_topic(topic)
             self._show_current()
             self.query_one("#topic-view", TopicView).focus()
 
