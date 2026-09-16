@@ -126,6 +126,20 @@ class HelpDocument:
     def topic_by_number(self, number: int) -> Optional[ParsedTopic]:
         return self._by_number.get(number)
 
+    def topic_for_link_fields(self, fields: dict[str, str]) -> Optional[ParsedTopic]:
+        """Resolve a link's explicitly typed reference in this document."""
+        if fields.get("context_name"):
+            return self.topic_by_context_name(fields["context_name"])
+        for kind in ("context_hash", "topic_offset"):
+            if kind in fields:
+                try:
+                    value = int(fields[kind], 0)
+                except ValueError:
+                    return None
+                offset = self._context_offset(value) if kind == "context_hash" else value
+                return self.topic_for_offset(offset)
+        return self.initial_topic
+
     def topic_for_offset(self, offset: Optional[int]) -> Optional[ParsedTopic]:
         """Return the topic whose range contains an offset."""
         if offset is None:
@@ -395,7 +409,7 @@ class HelpDocument:
         if target.startswith("macro:"):
             macro = target[len("macro:") :]
             return self._resolve_navigation_macro(macro, original)
-        if target.startswith(("topic_offset:", "file:", "window:", "window_number:")):
+        if target.startswith(("context_hash:", "topic_offset:", "file:", "window:", "window_number:")):
             return ResolvedTarget(
                 "external",
                 original,

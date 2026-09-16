@@ -169,3 +169,19 @@ def test_gid_contents_preserves_hierarchy_and_unresolved_books():
         ("Child", 1, "topic"),
     ]
     assert entries[1].topic is topic
+
+
+def test_external_context_hash_fields_resolve_signed_and_unknown_values():
+    topic = ParsedTopic(topic_number=1, topic_offset=100, raw_data={})
+    document = HelpDocument(
+        SimpleNamespace(
+            filepath="sample.hlp",
+            system=None,
+            get_topics=lambda: [topic],
+            context=SimpleNamespace(context_map={-1: 100}),
+        )
+    )
+
+    assert document.topic_for_link_fields({"context_hash": "-1"}) is topic
+    assert document.topic_for_link_fields({"context_hash": "0xFFFFFFFF"}) is topic
+    assert document.topic_for_link_fields({"context_hash": "42"}) is None

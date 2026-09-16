@@ -484,3 +484,31 @@ async def test_narrow_terminal_and_resize_keep_topic_renderable():
         options = app.query_one("#toolbar-options")
         assert options.region.width > 0
         assert options.region.right <= 30
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", [0xEA, 0xEB, 0xEE, 0xEF])
+async def test_parsed_external_jump_resolves_destination_context_hash(tmp_path, command):
+    import struct
+
+    fixture = os.path.join(DATA, "SMARTTOP.HLP")
+    sibling = tmp_path / "sibling.hlp"
+    shutil.copyfile(fixture, sibling)
+    source = HelpFile(filepath=fixture)
+    payload = struct.pack("<Bl", 4, 0x427) + b"sibling.hlp\0"
+    commands = bytes([command]) + struct.pack("<h", len(payload)) + payload + b"\x89\xff"
+    text = b"\0Follow\0\0"
+    _, mappings = source.topic._parse_topic_content_interleaved(commands, text, len(text), len(text), 0)
+    source.filepath = str(tmp_path / "source.hlp")
+    app = WinHlpApp(source, show_help_topics_on_start=False)
+    target = app.document.resolve_hotspot(mappings[0])
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app._activate_target(target)
+        await pilot.pause()
+        if command in (0xEA, 0xEE):
+            assert isinstance(app.screen, TopicPopup)
+            assert app.screen.topic.title == "How to use SmartTop"
+        else:
+            assert app.helpfile.filepath == str(sibling)
+            assert app.navigator.current.title == "How to use SmartTop"

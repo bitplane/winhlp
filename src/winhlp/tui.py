@@ -1175,18 +1175,9 @@ class WinHlpApp(App):
             key, separator, value = field.partition(":")
             if separator:
                 fields[key] = value
-        try:
-            offset = int(fields["topic_offset"], 0)
-        except (KeyError, ValueError):
-            offset = None
-
         filename = fields.get("file")
         if not filename:
-            topic = (
-                source_document.topic_by_context_name(fields["context_name"])
-                if fields.get("context_name")
-                else source_document.topic_for_offset(offset)
-            )
+            topic = source_document.topic_for_link_fields(fields)
             if topic is not None:
                 fields = self._with_viola_window(source_helpfile, topic, fields)
                 if target.open_as_popup or "window" in fields or "window_number" in fields:
@@ -1215,13 +1206,7 @@ class WinHlpApp(App):
         except Exception as error:
             self.push_screen(DiagnosticPopup(f"Could not open {candidate.name}: {error}"))
             return
-        topic = (
-            document.topic_by_context_name(fields["context_name"])
-            if fields.get("context_name")
-            else document.topic_for_offset(offset)
-            if offset is not None
-            else document.initial_topic
-        )
+        topic = document.topic_for_link_fields(fields)
         if topic is None:
             self.push_screen(DiagnosticPopup(f"{candidate.name} does not contain the requested topic."))
             return

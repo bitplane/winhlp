@@ -1453,7 +1453,7 @@ class TopicFile(InternalFile):
 
             if hotspot_active and current_external_jump:
                 is_popup = current_external_jump["is_popup"]
-                target_parts = [f"topic_offset:{current_external_jump['topic_offset']}"]
+                target_parts = [f"context_hash:{current_external_jump['topic_offset']}"]
                 if current_external_jump["external_file"]:
                     target_parts.append(f"file:{current_external_jump['external_file']}")
                 if current_external_jump["window_name"]:
