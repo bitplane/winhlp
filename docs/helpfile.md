@@ -1209,8 +1209,8 @@ required before output.
 	  unsigned char Type		0, 1, 4 or 6
 	  TOPICOFFSET TopicOffset
 	  unsigned char WindowNumber	only if Type = 1
-	  STRINGZ NameOfExternalFile	only if Type = 4 or 6
 	  STRINGZ WindowName		only if Type = 6
+	  STRINGZ NameOfExternalFile	only if Type = 4 or 6
       }
 
 Continue outputting strings from LinkData2 and parsing formatting commands

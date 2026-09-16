@@ -1676,10 +1676,13 @@ class TopicFile(InternalFile):
                     external_file = self._decode_text(linkdata1[start:q])
                     q += 1
                     if type_field == 6:
+                        # Type 6 stores WindowName before NameOfExternalFile
+                        # (helpdeco.c's label3 and FirstPass).
+                        window_name = external_file
                         start = q
                         while q < data_end and linkdata1[q] != 0x00:
                             q += 1
-                        window_name = self._decode_text(linkdata1[start:q])
+                        external_file = self._decode_text(linkdata1[start:q])
                 is_popup = command in (0xEA, 0xEE)
                 fmt["hyperlink"] = True
                 hotspot_active = True

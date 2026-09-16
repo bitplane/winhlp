@@ -489,27 +489,35 @@ async def test_narrow_terminal_and_resize_keep_topic_renderable():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("command", [0xEA, 0xEB, 0xEE, 0xEF])
-async def test_parsed_external_jump_resolves_destination_context_hash(tmp_path, command):
+@pytest.mark.parametrize("type_field", [4, 6])
+async def test_parsed_external_jump_resolves_destination_context_hash(tmp_path, command, type_field):
     import struct
 
     fixture = os.path.join(DATA, "SMARTTOP.HLP")
     sibling = tmp_path / "sibling.hlp"
     shutil.copyfile(fixture, sibling)
     source = HelpFile(filepath=fixture)
-    payload = struct.pack("<Bl", 4, 0x427) + b"sibling.hlp\0"
+    payload = struct.pack("<Bl", type_field, 0x427)
+    if type_field == 6:
+        payload += b"secondary\0"
+    payload += b"sibling.hlp\0"
     commands = bytes([command]) + struct.pack("<h", len(payload)) + payload + b"\x89\xff"
     text = b"\0Follow\0\0"
     _, mappings = source.topic._parse_topic_content_interleaved(commands, text, len(text), len(text), 0)
     source.filepath = str(tmp_path / "source.hlp")
     app = WinHlpApp(source, show_help_topics_on_start=False)
     target = app.document.resolve_hotspot(mappings[0])
+    assert "file:sibling.hlp" in target.original
+    if type_field == 6:
+        assert "window:secondary" in target.original
 
     async with app.run_test(size=(100, 30)) as pilot:
         app._activate_target(target)
         await pilot.pause()
-        if command in (0xEA, 0xEE):
+        if command in (0xEA, 0xEE) or type_field == 6:
             assert isinstance(app.screen, TopicPopup)
             assert app.screen.topic.title == "How to use SmartTop"
+            assert app.screen.document.helpfile.filepath == str(sibling)
         else:
             assert app.helpfile.filepath == str(sibling)
             assert app.navigator.current.title == "How to use SmartTop"
