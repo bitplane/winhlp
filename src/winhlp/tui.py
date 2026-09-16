@@ -1619,6 +1619,9 @@ class WinHlpApp(App):
         self._activate_navigation_entry(self.sidebar_entries[event.list_view.index])
 
     def _activate_navigation_entry(self, entry: NavigationEntry) -> None:
+        if entry.source == "CNT" and entry.target and entry.kind != "unresolved":
+            self._activate_target(self.document.resolve_cnt_target(entry.target))
+            return
         if len(entry.topics) > 1:
             self.push_screen(TopicChoicePopup(entry.label, entry.topics), self._topic_chosen)
             return

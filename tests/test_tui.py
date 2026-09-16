@@ -281,6 +281,7 @@ async def test_help_topics_contents_selection_opens_topic():
             )
         ],
         indices=[],
+        base_file="",
     )
 
     async with app.run_test(size=(100, 30)) as pilot:
@@ -545,3 +546,46 @@ async def test_jumpcontext_resolves_map_ids_in_destination(tmp_path, monkeypatch
         else:
             assert app.navigator.current.title == "How to use SmartTop"
             assert app.helpfile.filepath == str(sibling if filename else tmp_path / "source.hlp")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reference, base, destination, popup",
+    [
+        ("HO@sibling.hlp", "", "sibling.hlp", False),
+        ("HO>secondary@sibling.hlp", "", "sibling.hlp", True),
+        ("HO>secondary", "", "source.hlp", True),
+        ("HO", "sibling.hlp", "sibling.hlp", False),
+        ("HO@missing.hlp", "", None, False),
+    ],
+)
+async def test_contents_selection_preserves_file_and_window(tmp_path, reference, base, destination, popup):
+    from winhlp.lib.cnt import load_cnt
+
+    fixture = os.path.join(DATA, "SMARTTOP.HLP")
+    for filename in ("source.hlp", "sibling.hlp"):
+        shutil.copyfile(fixture, tmp_path / filename)
+    contents = tmp_path / "source.cnt"
+    contents.write_text(f":Base {base}\n1 Destination={reference}\n", encoding="cp1252")
+    app = WinHlpApp(HelpFile(filepath=str(tmp_path / "source.hlp")), show_help_topics_on_start=False)
+    app.document.cnt = load_cnt(contents)
+    entry = app.document.contents_entries()[0]
+    # Both files contain HO; an external entry must not bind to the local match.
+    assert entry.topic is None
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpTopicsScreen)
+        app.screen.query_one("#help-entries", ListView).index = 0
+        await pilot.press("enter")
+        await pilot.pause()
+        if destination is None:
+            assert isinstance(app.screen, DiagnosticPopup)
+        elif popup:
+            assert isinstance(app.screen, TopicPopup)
+            assert app.screen.document.helpfile.filepath == str(tmp_path / destination)
+            assert app.screen.topic.title == "How to use SmartTop"
+        else:
+            assert app.helpfile.filepath == str(tmp_path / destination)
+            assert app.navigator.current.title == "How to use SmartTop"

@@ -339,18 +339,39 @@ class HelpDocument:
         )
 
     def _resolve_cnt_reference(self, reference: str) -> Optional[ParsedTopic]:
+        return self.resolve_cnt_target(reference).topic
+
+    def resolve_cnt_target(self, reference: str) -> ResolvedTarget:
+        """Preserve a Contents entry's file and secondary-window destination."""
         if not reference:
-            return None
-        local = reference.partition("@")[0].partition(">")[0].strip()
+            return ResolvedTarget("unresolved", reference, document=self)
+        local, window, filename = _split_external_reference(reference)
+        local = local.strip()
         if local.startswith("!"):
-            return None
+            return self.resolve_target(f"macro:{local[1:]}")
+        if not filename and self.cnt and self.cnt.base_file:
+            filename, _, base_window = self.cnt.base_file.partition(">")
+            window = window or base_window
+        if filename or window:
+            fields = [f"context_name:{local}"]
+            if filename:
+                fields.append(f"file:{filename}")
+            if window:
+                fields.append(f"window:{window}")
+            return ResolvedTarget("external", "|".join(fields), document=self)
         topic = self.topic_by_context_name(local)
-        if topic is not None:
-            return topic
-        try:
-            return self.topic_for_offset(int(local, 0))
-        except ValueError:
-            return None
+        if topic is None:
+            try:
+                topic = self.topic_for_offset(int(local, 0))
+            except ValueError:
+                pass
+        return ResolvedTarget(
+            "topic" if topic is not None else "unresolved",
+            reference,
+            topic=topic,
+            detail=f"Could not resolve Help target: {reference}" if topic is None else None,
+            document=self,
+        )
 
     def browse_previous(self, topic: ParsedTopic) -> Optional[ParsedTopic]:
         return self.topic_by_number(topic.browse_prev_topic) if topic.browse_prev_topic is not None else None
