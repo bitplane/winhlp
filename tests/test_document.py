@@ -25,6 +25,16 @@ def test_smarttop_context_hash_link_resolves_to_intended_topic():
     assert hlp.get_document() is document
 
 
+def test_unknown_context_hash_links_remain_unresolved():
+    document = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")).get_document()
+
+    for kind in ("topic", "popup"):
+        target = document.resolve_target(f"{kind}:7FFFFFFF")
+        assert target.kind == "unresolved"
+        assert target.topic is None
+        assert not target.navigable
+
+
 def test_full_text_search_is_case_insensitive_and_uses_all_terms():
     document = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")).get_document()
 

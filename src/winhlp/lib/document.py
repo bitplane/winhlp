@@ -420,7 +420,7 @@ class HelpDocument:
                 value = None
             if value is not None:
                 offset = self._context_offset(value)
-                topic = self.topic_for_offset(offset) if offset is not None else self.topic_for_offset(value)
+                topic = self.topic_for_offset(offset)
 
         if topic is None:
             return ResolvedTarget("unresolved", original, detail=f"Could not resolve hotspot target: {target}")
