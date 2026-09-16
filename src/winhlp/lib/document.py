@@ -499,13 +499,42 @@ class HelpDocument:
                 open_as_popup=parsed.name == "popupid",
                 document=self,
             )
-        if parsed.name == "jumpcontext" and arguments:
+        if parsed.name in ("jumpcontext", "popupcontext") and arguments:
             filename = arguments[0] if len(arguments) > 1 else ""
             reference = arguments[1] if len(arguments) > 1 else arguments[0]
             fields = [f"context_id:{reference}"]
             if filename:
                 fields.append(f"file:{filename}")
-            return ResolvedTarget("external", "|".join(fields), document=self)
+            return ResolvedTarget(
+                "external",
+                "|".join(fields),
+                open_as_popup=parsed.name == "popupcontext",
+                document=self,
+            )
+        if parsed.name in ("jumphash", "popuphash") and arguments:
+            filename = arguments[0] if len(arguments) > 1 else ""
+            reference = arguments[1] if len(arguments) > 1 else arguments[0]
+            try:
+                hash_value = int(reference, 0)
+            except ValueError:
+                try:
+                    hash_value = int(reference, 16)
+                except ValueError:
+                    return ResolvedTarget("unresolved", original, detail=f"Invalid context hash: {reference}")
+            fields = [f"context_hash:{hash_value}"]
+            if filename:
+                fields.append(f"file:{filename}")
+            if not filename:
+                topic = self.topic_for_offset(self._context_offset(hash_value))
+                if topic is not None:
+                    kind = "popup" if parsed.name == "popuphash" else "topic"
+                    return ResolvedTarget(kind, original, topic=topic, document=self)
+            return ResolvedTarget(
+                "external",
+                "|".join(fields),
+                open_as_popup=parsed.name == "popuphash",
+                document=self,
+            )
         if parsed.name in ("alink", "klink") and arguments:
             requested = {item.strip().casefold() for item in arguments[0].split(";") if item.strip()}
             topics = []

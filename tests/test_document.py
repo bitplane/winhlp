@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from winhlp.lib.cnt import load_cnt
 from winhlp.lib.document import HelpDocument, HelpNavigator
 from winhlp.lib.hlp import HelpFile
@@ -129,6 +131,65 @@ def test_allowlisted_navigation_macros_resolve_but_arbitrary_macros_do_not():
     assert safe.topic is document.topics[1]
     assert unsafe.kind == "macro"
     assert "not supported" in unsafe.detail
+
+
+@pytest.mark.parametrize("name", ["JumpID", "JI"])
+def test_jump_id_full_name_and_alias_resolve(name):
+    document = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")).get_document()
+    topic = document.topics[1]
+    assert document.resolve_target(f'macro:{name}("{topic.context_names[0]}")').topic is topic
+
+
+@pytest.mark.parametrize(
+    "name, kind, field",
+    [
+        ("JumpContext", "external", "context_id:0x427"),
+        ("JC", "external", "context_id:0x427"),
+        ("PopupContext", "external", "context_id:0x427"),
+        ("PC", "external", "context_id:0x427"),
+        ("JumpHash", "external", "context_hash:1063"),
+        ("JH", "external", "context_hash:1063"),
+        ("PopupHash", "external", "context_hash:1063"),
+    ],
+)
+def test_numeric_navigation_macros_preserve_external_destination(name, kind, field):
+    document = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")).get_document()
+    target = document.resolve_target(f"macro:{name}(`other.hlp`, 0x427)")
+    assert target.kind == kind
+    assert field in target.original
+    assert "file:other.hlp" in target.original
+    assert target.open_as_popup == name.casefold().startswith(("popup", "pc"))
+
+
+@pytest.mark.parametrize("name", ["JumpHash", "JH"])
+def test_local_jump_hash_resolves_topic(name):
+    document = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")).get_document()
+    target = document.resolve_target(f"macro:{name}(0x427)")
+    assert target.kind == "topic"
+    assert target.topic.title == "How to use SmartTop"
+
+
+@pytest.mark.parametrize("name", ["PopupHash"])
+def test_local_popup_hash_resolves_popup(name):
+    document = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")).get_document()
+    target = document.resolve_target(f"macro:{name}(193ADDD8)")
+    assert target.kind == "popup"
+    assert target.topic is not None
+
+
+@pytest.mark.parametrize("name", ["ALink", "AL", "KLink", "KL"])
+def test_keyword_navigation_aliases_accept_backtick_strings(name):
+    document = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")).get_document()
+    entry = next(entry for entry in document.index_entries() if entry.topics)
+    target = document.resolve_target(f"macro:{name}(`{entry.target}`)")
+    assert target.navigable
+
+
+@pytest.mark.parametrize("macro", ["JI(`unterminated)", "JI(Nested(Call))", "JH(not-a-number)"])
+def test_malformed_navigation_macros_fail_safely(macro):
+    document = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")).get_document()
+    target = document.resolve_target(f"macro:{macro}")
+    assert not target.navigable
 
 
 def test_layout_uses_record_offsets_for_fixed_boundary():
