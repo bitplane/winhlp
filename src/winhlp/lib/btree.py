@@ -291,16 +291,20 @@ class BTree(BaseModel):
 
         # Find the page index from current offset
         page_idx = (buffer.current_offset - buffer.first_leaf - 8) // buffer.page_size
+        visited = {page_idx}
         yield self.pages[page_idx], n_entries
 
         while True:
             # Store current page index before getting next
             current_page_idx = buffer.next_page
+            if current_page_idx in visited:
+                raise BTreeError(f"Cycle in leaf pages at page: {current_page_idx}")
             n_entries = self.get_next_page(buffer)
 
             if n_entries == 0:
                 break
 
+            visited.add(current_page_idx)
             yield self.pages[current_page_idx], n_entries
 
     def iterate_leaf_entries_with_parser(self, parse_entry_func):
