@@ -165,3 +165,59 @@ def test_hotspot_strings_use_help_file_encoding():
 
     assert parsed.name == "詳細"
     assert parsed.target == "コンテキスト"
+
+
+def _annotation_container(topic_offset):
+    files = {
+        "@VERSION": b"\x08bmf\x01\0",
+        "@LINK": struct.pack("<HIII", 1, topic_offset, 0, 0),
+        f"{topic_offset}!0": b"A user note",
+    }
+    page_size = 128
+    first_file = 16 + 9 + 38 + page_size
+    entries = b""
+    body = b""
+    for name, data in sorted(files.items()):
+        entries += name.encode("ascii") + b"\0" + struct.pack("<l", first_file + len(body))
+        body += struct.pack("<llB", len(data) + 9, len(data), 4) + data
+    leaf = struct.pack("<hhhh", 0, len(files), -1, -1) + entries
+    tree = struct.pack("<HHH16shhhhhhi", 0x293B, 0x402, page_size, b"z4", 0, 0, 0, -1, 1, 1, len(files))
+    tree += leaf.ljust(page_size, b"\0")
+    directory = struct.pack("<llB", len(tree) + 9, len(tree), 4) + tree
+    return struct.pack("<llll", 0x35F3F, 16, -1, 16 + len(directory) + len(body)) + directory + body
+
+
+def test_annotation_container_is_opened_once_and_attached_to_help_topic(tmp_path, monkeypatch):
+    import builtins
+    from winhlp.lib.ann import AnnotationFile
+    from winhlp.lib.hlp import HelpFile
+
+    original = HelpFile(filepath=os.path.join(os.path.dirname(__file__), "data", "SMARTTOP.HLP"))
+    topic = original.get_topics()[1]
+    help_path = tmp_path / "sample.hlp"
+    help_path.write_bytes(original.data)
+    ann_path = tmp_path / "sample.ANN"
+    ann_path.write_bytes(_annotation_container(topic.topic_offset))
+    original_open = builtins.open
+    ann_opens = 0
+
+    def count_annotation_opens(path, *args, **kwargs):
+        nonlocal ann_opens
+        if str(path).lower().endswith(".ann"):
+            ann_opens += 1
+            assert ann_opens <= 2, "Annotation parsing recursively reopened its own sidecar"
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", count_annotation_opens)
+    standalone = AnnotationFile(filepath=str(ann_path))
+    assert standalone.get_annotation_for_topic(topic.topic_offset) == "A user note"
+    assert not standalone.hlp_parser.parse_errors
+    assert ann_opens == 1
+
+    # Exercise lowercase discovery as well as standalone uppercase parsing.
+    ann_path.rename(ann_path.with_suffix(".ann"))
+    ann_opens = 0
+    helpfile = HelpFile(filepath=str(help_path))
+    assert helpfile.get_topics()[1].annotations == ["A user note"]
+    assert not helpfile.parse_errors
+    assert ann_opens == 1

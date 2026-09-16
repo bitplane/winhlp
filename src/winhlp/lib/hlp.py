@@ -258,7 +258,9 @@ class HelpFile(BaseModel):
         Annotation files use the same container format as .HLP but live beside
         the help file (WinHelp writes them when the user annotates a topic).
         """
-        if not self.filepath:
+        # AnnotationFile uses HelpFile to read its container. An ANN is already
+        # the sidecar, so discovering another sidecar here would reopen itself.
+        if not self.filepath or self.filepath.lower().endswith(".ann"):
             return
         base = os.path.splitext(self.filepath)[0]
         ann_path = None
