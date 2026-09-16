@@ -59,7 +59,7 @@ class HtmlExporter:
         self.document = helpfile.get_document()
         self._font = getattr(helpfile, "font", None)
         self._topic_to_anchor: dict = {}
-        self._font_class: dict = {}  # font_number -> css class name
+        self._style_class: dict = {}  # effective CSS rules -> css class name
         self._css_rules: dict = {}  # class name -> css body
         self._image_cache: dict = {}  # picture number -> <img> src or None
 
@@ -209,12 +209,6 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
 
     def _font_class_for(self, span) -> Optional[str]:
         n = span.font_number
-        if n is None:
-            key = self._span_style_key(span, {})
-            if not key:
-                return None
-        if n in self._font_class:
-            return self._font_class[n] if n is not None else None
         attrs = {}
         if self._font is not None and n is not None:
             try:
@@ -223,20 +217,13 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
                 attrs = {}
         rules = self._css_from_attrs(attrs, span)
         if not rules:
-            if n is not None:
-                self._font_class[n] = None
             return None
-        name = f"f{n if n is not None else 'x'}"
-        self._font_class[n] = name
+        if rules in self._style_class:
+            return self._style_class[rules]
+        name = f"f{len(self._style_class)}"
+        self._style_class[rules] = name
         self._css_rules[name] = rules
         return name
-
-    @staticmethod
-    def _span_style_key(span, attrs) -> str:
-        return "".join(
-            "1" if getattr(span, a, False) else "0"
-            for a in ("is_bold", "is_italic", "is_underline", "is_strikethrough")
-        )
 
     @staticmethod
     def _css_from_attrs(attrs, span) -> str:

@@ -6,7 +6,7 @@ import re
 import pytest
 from winhlp.lib.hlp import HelpFile
 from winhlp.lib.html import export_html
-from winhlp.lib.internal_files.topic import Table, TableCell, TableRow, TextSpan, TopicTableBlock
+from winhlp.lib.internal_files.topic import Table, TableCell, TableRow, TextSpan, TopicTableBlock, TopicTextBlock
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 
@@ -71,6 +71,30 @@ def test_html_context_hash_links_use_shared_document_resolution():
     assert '<a class="jump" href="#topic-1">' in out
 
 
+@pytest.mark.parametrize("font_number", [None, 0])
+def test_html_preserves_each_span_style(font_number):
+    hlp = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP"))
+    hlp.font = None
+    spans = [
+        TextSpan(text="first bold", font_number=font_number, is_bold=True, raw_data={}),
+        TextSpan(text="italic", font_number=font_number, is_italic=True, raw_data={}),
+        TextSpan(text="second bold", font_number=font_number, is_bold=True, raw_data={}),
+        TextSpan(text="plain", font_number=font_number, raw_data={}),
+    ]
+    hlp.get_topics()[0].content_blocks = [TopicTextBlock(text_spans=spans)]
+
+    out = export_html(hlp)
+    for text, rule in (
+        ("first bold", "font-weight: bold"),
+        ("italic", "font-style: italic"),
+        ("second bold", "font-weight: bold"),
+    ):
+        match = re.search(r'<span class="([^"]+)">' + text + r"</span>", out)
+        assert match is not None
+        assert f".{match.group(1)} {{ {rule} }}" in out
+    assert not re.search(r"<span[^>]*>plain</span>", out)
+
+
 @pytest.mark.parametrize(
     "face, escaped",
     [
@@ -125,6 +149,7 @@ def test_html_table_preserves_links_images_and_styled_paragraphs():
     assert '<a class="jump" href="#topic-1">Open topic</a>' in cell
     assert '<img src="data:image/' in cell
     assert 'alt="bitmap 0"' in cell
-    assert '<span class="fx">Bold &lt;text&gt;<br>line</span>' in cell
+    styled = re.search(r'<span class="([^"]+)">Bold &lt;text&gt;<br>line</span>', cell)
+    assert styled is not None
     assert "<p>Paragraph</p>" in cell
-    assert ".fx { font-weight: bold }" in out
+    assert f".{styled.group(1)} {{ font-weight: bold }}" in out
