@@ -212,7 +212,11 @@ class HelpFile(BaseModel):
 
         # Complete phrase parsing after both PhrIndex and PhrImage are available
         if self.phrindex and self.phrimage:
-            self.phrindex.complete_phrase_parsing(self.phrimage)
+            try:
+                self.phrindex.complete_phrase_parsing(self.phrimage)
+            except ValueError as error:
+                self.parse_errors.append({"file": "|PhrIndex", "error": f"ValueError: {error}"})
+                self.phrindex = None
 
         self.topic = self._parse_topic()
         self.context = self._parse_context()

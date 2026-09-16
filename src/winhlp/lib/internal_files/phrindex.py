@@ -58,7 +58,7 @@ class PhrIndexFile(InternalFile):
 
     def _parse(self):
         """Parses the |PhrIndex file data."""
-        if len(self.raw_data) < 30:  # PHRINDEXHDR is 30 bytes
+        if len(self.raw_data) < 28:  # Six DWORDs and two WORDs
             return
 
         self._parse_header()
@@ -165,6 +165,14 @@ class PhrIndexFile(InternalFile):
 
     def _parse_hall_phrase_offsets(self, phrase_data: bytes):
         """Parse Hall compression phrase offsets using bit-stream algorithm from helldeco.c"""
+        if self.header is None:
+            raise ValueError("Truncated PhrIndex header")
+        # Every phrase consumes at least one image byte and a terminating bit
+        # plus its remainder bits. Do not allocate from an unchecked file count.
+        available_bits = ((len(self.raw_data) - 28) // 4) * 32
+        max_entries = min(len(phrase_data), available_bits // (1 + self.header.bits))
+        if not 0 <= self.header.entries <= max_entries:
+            raise ValueError("PhrIndex phrase count exceeds available data")
         # Initialize GetBit state to match helldeco.c exactly
         self._init_getbit()
         # The GetBit stream starts right after the PHRINDEXHDR. That header is
@@ -206,6 +214,8 @@ class PhrIndexFile(InternalFile):
 
             # offset += n; PhraseOffsets[(int)l + 1] = offset;
             offset += n
+            if offset > len(phrase_data):
+                raise ValueError("PhrIndex phrase extends past PhrImage data")
             phrase_offsets.append(offset)
 
         # Extract phrases using calculated offsets
@@ -233,7 +243,7 @@ class PhrIndexFile(InternalFile):
     def _get_dword(self) -> int:
         """Get 32-bit word from raw_data, equivalent to getdw(f) in C"""
         if self._current_dword_pos + 4 > len(self.raw_data):
-            return 0
+            raise ValueError("Truncated PhrIndex bitstream")
 
         # Read little-endian 32-bit word: getdw reads two 16-bit words
         word1 = struct.unpack_from("<H", self.raw_data, self._current_dword_pos)[0]

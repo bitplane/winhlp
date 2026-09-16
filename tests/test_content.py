@@ -153,3 +153,46 @@ def test_keyword_cross_references_use_byte_offsets():
     index = hlp._keyword_offset_index()
 
     assert [offset for offset, keywords in index.items() if "K:Application window" in keywords] == [4623]
+
+
+@pytest.mark.parametrize(
+    "count, bits, bitstream, image, error",
+    [
+        (0x7FFFFFFF, 0, b"\0" * 4, b"x", "phrase count"),
+        (-1, 0, b"\0" * 4, b"x", "phrase count"),
+        (33, 0, b"\0" * 4, b"x" * 33, "phrase count"),
+        (1, 0, b"\xff" * 4, b"x" * 100, "bitstream"),
+        (1, 0, b"\x01\0\0\0", b"x", "extends past"),
+    ],
+)
+def test_hall_rejects_counts_and_offsets_beyond_input(count, bits, bitstream, image, error, monkeypatch):
+    original_get_bit = PhrIndexFile._get_bit
+    reads = 0
+
+    def bounded_get_bit(self):
+        nonlocal reads
+        reads += 1
+        assert reads <= 1024, "Parser kept reading beyond the small test input"
+        return original_get_bit(self)
+
+    monkeypatch.setattr(PhrIndexFile, "_get_bit", bounded_get_bit)
+    header = struct.pack("<llllllHH", 0x4A01, count, 28 + len(bitstream), len(image), len(image), 0, bits, 0x4A00)
+    index = PhrIndexFile(filename="|PhrIndex", raw_data=header + bitstream)
+    with pytest.raises(ValueError, match=error):
+        index._parse_hall_phrase_offsets(image)
+    assert index.phrase_bytes == []
+    assert index.phrases == []
+
+
+def test_corrupt_hall_index_is_reported_without_aborting_help_file(tmp_path):
+    original = HelpFile(filepath=os.path.join(DATA, "win95", "MSNINT.HLP"))
+    data = bytearray(original.data)
+    struct.pack_into("<l", data, original.directory.files["|PhrIndex"] + 9 + 4, -1)
+    path = tmp_path / "corrupt.hlp"
+    path.write_bytes(data)
+
+    damaged = HelpFile(filepath=str(path))
+
+    assert damaged.phrindex is None
+    assert any(error["file"] == "|PhrIndex" and "phrase count" in error["error"] for error in damaged.parse_errors)
+    assert damaged.get_topic_count() == original.get_topic_count()
