@@ -90,10 +90,14 @@ def test_system_contents_offset_selects_initial_topic():
 
 
 def test_cnt_parser_preserves_books_levels_targets_and_diagnostics(tmp_path: Path):
+    (tmp_path / "included.cnt").write_text(
+        ":Base OTHER.HLP\n1 Included=CTX_INCLUDED\n:Index Other index=OTHER.HLP\n",
+        encoding="cp1252",
+    )
     path = tmp_path / "sample.cnt"
     path.write_text(
         ":Title Example Help\n:Base SAMPLE.HLP\n1 Introduction=CTX_INTRO\n"
-        "1 Tasks\n2 First task=CTX_TASK\n:Include unsafe.cnt\n",
+        "1 Tasks\n2 First task=CTX_TASK\n:Include included.cnt\n:Include ../unsafe.cnt\n",
         encoding="cp1252",
     )
 
@@ -105,8 +109,40 @@ def test_cnt_parser_preserves_books_levels_targets_and_diagnostics(tmp_path: Pat
         ("Introduction", 0, "topic"),
         ("Tasks", 0, "book"),
         ("First task", 1, "topic"),
+        ("Included", 0, "topic"),
     ]
-    assert "not followed" in contents.diagnostics[0]
+    assert contents.entries[-1].base_file == "OTHER.HLP"
+    assert [(index.label, index.target, index.base_file) for index in contents.indices] == [
+        ("Other index", "OTHER.HLP", "OTHER.HLP")
+    ]
+    assert "not a sibling" in contents.diagnostics[0]
+
+
+def test_cnt_include_cycles_and_missing_files_are_diagnostics(tmp_path: Path):
+    (tmp_path / "one.cnt").write_text(":Include two.cnt\n:Include missing.cnt\n", encoding="cp1252")
+    (tmp_path / "two.cnt").write_text(":Include one.cnt\n", encoding="cp1252")
+
+    contents = load_cnt(tmp_path / "one.cnt")
+
+    assert any("include cycle" in diagnostic for diagnostic in contents.diagnostics)
+    assert any("missing.cnt" in diagnostic for diagnostic in contents.diagnostics)
+
+
+def test_included_contents_references_use_their_own_base_file(tmp_path: Path):
+    (tmp_path / "child.cnt").write_text(":Base CHILD.HLP\n1 Child=CTX_CHILD\n", encoding="cp1252")
+    (tmp_path / "root.cnt").write_text(":Base ROOT.HLP\n:Include child.cnt\n", encoding="cp1252")
+    topic = ParsedTopic(
+        topic_number=1, title="Local collision", context_names=["CTX_CHILD"], topic_offset=100, raw_data={}
+    )
+    fake = SimpleNamespace(filepath=str(tmp_path / "ROOT.HLP"), system=None, get_topics=lambda: [topic])
+    document = HelpDocument(fake)
+    document.cnt = load_cnt(tmp_path / "root.cnt")
+
+    entry = document.contents_entries()[0]
+
+    assert entry.topic is None
+    assert entry.target == "CTX_CHILD@CHILD.HLP"
+    assert document.resolve_cnt_target(entry.target).kind == "external"
 
 
 def test_real_index_preserves_keyword_type_hierarchy_and_multiple_targets():

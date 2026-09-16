@@ -195,7 +195,8 @@ class HelpDocument:
         if self.cnt and self.cnt.entries:
             entries = []
             for item in self.cnt.entries:
-                topic = self._resolve_cnt_reference(item.reference)
+                reference = self._qualify_cnt_reference(item.reference, getattr(item, "base_file", ""))
+                topic = self._resolve_cnt_reference(reference)
                 entries.append(
                     NavigationEntry(
                         item.label,
@@ -203,7 +204,7 @@ class HelpDocument:
                         item.level,
                         item.kind,
                         (topic,) if topic else (),
-                        item.reference,
+                        reference,
                         "CNT",
                     )
                 )
@@ -247,13 +248,21 @@ class HelpDocument:
     def index_entries(self) -> list[NavigationEntry]:
         entries = {}
         if self.cnt:
-            for title, target in self.cnt.indices:
+            for item in self.cnt.indices:
+                if hasattr(item, "label"):
+                    title, target = item.label, item.target
+                    base_file = item.base_file
+                else:  # compatibility with callers constructing the old tuple form
+                    title, target = item
+                    base_file = ""
+                target = target or base_file
+                external_target = f"@{target}" if target else ""
                 key = ("CNT", title.casefold(), target.casefold())
                 entries[key] = NavigationEntry(
                     title or target,
                     None,
-                    kind="unresolved",
-                    target=target,
+                    kind="external_index" if external_target else "unresolved",
+                    target=external_target,
                     source="CNT",
                     index_title=title,
                 )
@@ -340,6 +349,14 @@ class HelpDocument:
 
     def _resolve_cnt_reference(self, reference: str) -> Optional[ParsedTopic]:
         return self.resolve_cnt_target(reference).topic
+
+    def _qualify_cnt_reference(self, reference: str, base_file: str) -> str:
+        if not reference or "@" in reference or not base_file:
+            return reference
+        if Path(base_file.replace("\\", "/")).name.casefold() == Path(self.helpfile.filepath).name.casefold():
+            return reference
+        context, separator, window = reference.partition(">")
+        return f"{context}{'>' + window if separator else ''}@{base_file}"
 
     def resolve_cnt_target(self, reference: str) -> ResolvedTarget:
         """Preserve a Contents entry's file and secondary-window destination."""

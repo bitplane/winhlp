@@ -12,6 +12,14 @@ class CntEntry:
     level: int
     reference: str = ""
     kind: str = "topic"
+    base_file: str = ""
+
+
+@dataclass(frozen=True)
+class CntIndex:
+    label: str
+    target: str
+    base_file: str = ""
 
 
 @dataclass(frozen=True)
@@ -19,12 +27,19 @@ class CntDocument:
     title: str = ""
     base_file: str = ""
     entries: tuple[CntEntry, ...] = ()
-    indices: tuple[tuple[str, str], ...] = ()
+    indices: tuple[CntIndex, ...] = ()
     diagnostics: tuple[str, ...] = ()
 
 
 def load_cnt(path: Path, encoding: str = "cp1252") -> CntDocument:
-    """Read a sibling CNT without following includes or paths outside its directory."""
+    """Read a CNT and recursively combine safe sibling includes."""
+    return _load_cnt(path.resolve(), encoding, ())
+
+
+def _load_cnt(path: Path, encoding: str, stack: tuple[Path, ...]) -> CntDocument:
+    if path in stack:
+        chain = " -> ".join(item.name for item in (*stack, path))
+        return CntDocument(diagnostics=(f"include cycle: {chain}",))
     try:
         raw = path.read_bytes()
     except OSError as error:
@@ -33,7 +48,7 @@ def load_cnt(path: Path, encoding: str = "cp1252") -> CntDocument:
     title = ""
     base_file = ""
     entries = []
-    indices = []
+    indices: list[CntIndex] = []
     diagnostics = []
     for number, original in enumerate(text.splitlines(), start=1):
         line = original.strip()
@@ -49,9 +64,16 @@ def load_cnt(path: Path, encoding: str = "cp1252") -> CntDocument:
                 base_file = Path(value.replace("\\", "/")).name
             elif command == "index":
                 label, separator, target = value.partition("=")
-                indices.append((label.strip(), target.strip() if separator else ""))
+                indices.append(CntIndex(label.strip(), target.strip() if separator else "", base_file))
             elif command == "include":
-                diagnostics.append(f"line {number}: CNT include was not followed: {value}")
+                requested = value.strip().strip("\"`'").replace("\\", "/")
+                if not requested or Path(requested).name != requested:
+                    diagnostics.append(f"line {number}: CNT include is not a sibling file: {value}")
+                    continue
+                included = _load_cnt(path.parent / requested, encoding, (*stack, path))
+                entries.extend(included.entries)
+                indices.extend(included.indices)
+                diagnostics.extend(f"{requested}: {message}" for message in included.diagnostics)
             continue
         level_text, separator, body = line.partition(" ")
         if not separator or not level_text.isdigit():
@@ -64,6 +86,7 @@ def load_cnt(path: Path, encoding: str = "cp1252") -> CntDocument:
                 max(0, int(level_text) - 1),
                 reference.strip() if has_target else "",
                 "topic" if has_target else "book",
+                base_file,
             )
         )
     return CntDocument(title, base_file, tuple(entries), tuple(indices), tuple(diagnostics))

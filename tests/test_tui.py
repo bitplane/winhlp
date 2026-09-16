@@ -600,6 +600,32 @@ async def test_contents_selection_preserves_file_and_window(tmp_path, reference,
 
 
 @pytest.mark.asyncio
+async def test_external_cnt_index_opens_target_help_file(tmp_path):
+    from winhlp.lib.cnt import load_cnt
+
+    fixture = os.path.join(DATA, "SMARTTOP.HLP")
+    source = tmp_path / "source.hlp"
+    sibling = tmp_path / "sibling.hlp"
+    shutil.copyfile(fixture, source)
+    shutil.copyfile(fixture, sibling)
+    cnt_path = tmp_path / "source.cnt"
+    cnt_path.write_text(":Index Sibling index=sibling.hlp\n", encoding="cp1252")
+    app = WinHlpApp(HelpFile(filepath=str(source)), show_help_topics_on_start=False)
+    app.document.cnt = load_cnt(cnt_path)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press("k")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpTopicsScreen)
+        assert app.screen.entries[0].kind == "external_index"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.helpfile.filepath == str(sibling)
+        assert app.navigator.current is app.document.initial_topic
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["link", "entry", "choice", "search", "search_enter", "browse", "local_external"])
 async def test_new_local_navigation_clears_cross_file_forward_history(tmp_path, action):
     from winhlp.lib.document import NavigationEntry
