@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from .document import parse_embedded_resource
 from .internal_files.topic import TopicTableBlock, TopicTextBlock
+from .layout import layout_topic
 
 try:
     from PIL import Image
@@ -140,11 +141,11 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
             parts.append(f'<p class="topic-meta">{" &middot; ".join(meta)}</p>')
 
         if topic.content_blocks:
-            for block in topic.content_blocks:
-                if isinstance(block, TopicTextBlock):
-                    parts.append(self._render_spans(block.text_spans))
-                elif isinstance(block, TopicTableBlock):
-                    parts.append(self._render_table(block.table))
+            layout = layout_topic(topic)
+            fixed = "\n".join(self._render_block(block) for block in layout.fixed_blocks)
+            if fixed:
+                parts.append(f'<div class="nonscroll">{fixed}</div>')
+            parts.extend(self._render_block(block) for block in layout.scrolling_blocks)
         else:
             parts.append(self._render_spans(topic.text_spans))
             for table in topic.tables:
@@ -152,7 +153,14 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         parts.append("</section>")
         return "\n".join(p for p in parts if p)
 
-    def _render_spans(self, spans) -> str:
+    def _render_block(self, block) -> str:
+        if isinstance(block, TopicTextBlock):
+            return self._render_spans(block.text_spans, block.paragraph_info)
+        if isinstance(block, TopicTableBlock):
+            return self._render_table(block.table)
+        return ""
+
+    def _render_spans(self, spans, paragraph_info=None) -> str:
         """Turn the topic's flat text_spans into <p> paragraphs of styled runs.
 
         Span text carries the paragraph structure the interleaved parser emitted:
@@ -174,8 +182,47 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         for runs in paragraphs:
             inner = "".join(runs).strip()
             if inner:
-                html_paras.append(f"<p>{inner}</p>")
+                style = self._paragraph_style(paragraph_info)
+                attribute = f' style="{style}"' if style else ""
+                html_paras.append(f"<p{attribute}>{inner}</p>")
         return "\n".join(html_paras)
+
+    @staticmethod
+    def _paragraph_style(paragraph) -> str:
+        if paragraph is None:
+            return ""
+        declarations = []
+        if paragraph.bits.center_aligned_paragraph:
+            declarations.append("text-align: center")
+        elif paragraph.bits.right_aligned_paragraph:
+            declarations.append("text-align: right")
+        for field, css in (
+            (paragraph.left_indent, "margin-left"),
+            (paragraph.right_indent, "margin-right"),
+            (paragraph.firstline_indent, "text-indent"),
+            (paragraph.spacing_above, "margin-top"),
+            (paragraph.spacing_below, "margin-bottom"),
+        ):
+            if field:
+                declarations.append(f"{css}: {field / 20:g}pt")
+        if paragraph.spacing_lines and paragraph.spacing_lines > 0:
+            declarations.append(f"line-height: {paragraph.spacing_lines / 20:g}pt")
+        if paragraph.tab_info and paragraph.tab_info.tabs:
+            first = max(1, paragraph.tab_info.tabs[0].position // 120)
+            declarations.append(f"tab-size: {first}")
+        border = paragraph.border_info
+        if border:
+            border_style = "double" if border.border_double else "solid"
+            width = max(1, border.border_width)
+            for enabled, side in (
+                (border.border_box or border.border_top, "top"),
+                (border.border_box or border.border_right, "right"),
+                (border.border_box or border.border_bottom, "bottom"),
+                (border.border_box or border.border_left, "left"),
+            ):
+                if enabled:
+                    declarations.append(f"border-{side}: {width}px {border_style} currentColor")
+        return "; ".join(declarations)
 
     def _render_run(self, span, text: str) -> str:
         # line break / tab inside a run
@@ -246,7 +293,7 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         if attrs.get("italic") or span.is_italic:
             decls.append("font-style: italic")
         decorations = []
-        if attrs.get("underline") or attrs.get("double_underline") or span.is_underline:
+        if attrs.get("underline") or attrs.get("double_underline") or span.is_underline or span.is_double_underline:
             decorations.append("underline")
         if attrs.get("strikethrough") or span.is_strikethrough:
             decorations.append("line-through")
@@ -254,9 +301,16 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
             decls.append("text-decoration: " + " ".join(decorations))
         if attrs.get("small_caps"):
             decls.append("font-variant: small-caps")
+        if span.is_superscript:
+            decls.extend(("vertical-align: super", "font-size: smaller"))
+        elif span.is_subscript:
+            decls.extend(("vertical-align: sub", "font-size: smaller"))
         fg = attrs.get("fg_rgb")
         if fg and fg != (0, 0, 0):
             decls.append("color: #%02x%02x%02x" % fg)
+        bg = attrs.get("bg_rgb") or span.bg_rgb
+        if bg and bg != (255, 255, 255):
+            decls.append("background-color: #%02x%02x%02x" % bg)
         return "; ".join(decls)
 
     # -- tables ------------------------------------------------------------
@@ -266,12 +320,14 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         for row in table.rows:
             cells = []
             for cell in row.cells:
-                content = self._render_spans(cell.text_spans)
+                content = self._render_spans(cell.text_spans, cell.paragraph_info)
                 align = f' style="text-align: {cell.alignment}"' if cell.alignment != "left" else ""
                 span = f' colspan="{cell.column_span}"' if cell.column_span > 1 else ""
                 cells.append(f"<td{align}{span}>{content}</td>")
             rows.append("<tr>" + "".join(cells) + "</tr>")
-        return "<table>\n" + "\n".join(rows) + "\n</table>" if rows else ""
+        style = self._paragraph_style(table.table_formatting)
+        attribute = f' style="{style}"' if style else ""
+        return f"<table{attribute}>\n" + "\n".join(rows) + "\n</table>" if rows else ""
 
     # -- images ------------------------------------------------------------
 

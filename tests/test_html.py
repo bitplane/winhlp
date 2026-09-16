@@ -7,7 +7,19 @@ import pytest
 from winhlp.lib.hlp import HelpFile
 from winhlp.lib.html import export_html
 from winhlp.lib.internal_files.bitmap import HotspotInfo
-from winhlp.lib.internal_files.topic import Table, TableCell, TableRow, TextSpan, TopicTableBlock, TopicTextBlock
+from winhlp.lib.internal_files.topic import (
+    BorderInfo,
+    ParagraphInfo,
+    ParagraphInfoBits,
+    Tab,
+    TabInfo,
+    Table,
+    TableCell,
+    TableRow,
+    TextSpan,
+    TopicTableBlock,
+    TopicTextBlock,
+)
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 
@@ -112,6 +124,96 @@ def test_html_bitmap_hotspots_render_accessible_image_map():
     external = re.search(r'<area[^>]+coords="60,2,70,7"[^>]+>', output).group(0)
     assert "href=" not in external
     assert 'alt="External jump"' in external
+
+
+def test_html_preserves_fixed_regions_and_paragraph_layout():
+    hlp = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP"))
+    topic = hlp.get_topics()[0]
+    bits = ParagraphInfoBits(
+        unknown_follows=False,
+        spacing_above_follows=True,
+        spacing_below_follows=True,
+        spacing_lines_follows=True,
+        left_indent_follows=True,
+        right_indent_follows=True,
+        firstline_indent_follows=True,
+        unused=False,
+        borderinfo_follows=True,
+        tabinfo_follows=True,
+        right_aligned_paragraph=True,
+        center_aligned_paragraph=False,
+    )
+    paragraph = ParagraphInfo(
+        topic_size=0,
+        topic_length=0,
+        bits=bits,
+        spacing_above=40,
+        spacing_below=20,
+        spacing_lines=280,
+        left_indent=240,
+        right_indent=120,
+        firstline_indent=-120,
+        tab_info=TabInfo(number_of_tab_stops=1, tabs=[Tab(position=480, tab_type=0)]),
+        border_info=BorderInfo(
+            border_box=False,
+            border_top=True,
+            border_left=False,
+            border_bottom=True,
+            border_right=False,
+            border_thick=False,
+            border_double=True,
+            border_unknown=False,
+            border_width=2,
+        ),
+        raw_data={},
+    )
+    topic.topic_offset = 100
+    topic.non_scroll_offset = 150
+    topic.content_blocks = [
+        TopicTextBlock(
+            text_spans=[TextSpan(text="Fixed heading", raw_data={})],
+            paragraph_info=paragraph,
+            source_record_offset=100,
+        ),
+        TopicTextBlock(
+            text_spans=[TextSpan(text="Scrolling body", raw_data={})],
+            source_record_offset=150,
+        ),
+    ]
+
+    output = export_html(hlp)
+    fixed = re.search(r'<div class="nonscroll">(.*?)</div>', output, re.S).group(1)
+
+    assert "Fixed heading" in fixed
+    assert "Scrolling body" not in fixed
+    assert "text-align: right" in fixed
+    assert "margin-left: 12pt" in fixed
+    assert "margin-right: 6pt" in fixed
+    assert "text-indent: -6pt" in fixed
+    assert "margin-top: 2pt" in fixed and "margin-bottom: 1pt" in fixed
+    assert "line-height: 14pt" in fixed and "tab-size: 4" in fixed
+    assert "border-top: 2px double currentColor" in fixed
+    assert "border-bottom: 2px double currentColor" in fixed
+
+
+def test_html_preserves_superscript_subscript_background_and_double_underline():
+    hlp = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP"))
+    hlp.font = None
+    hlp.get_topics()[0].content_blocks = [
+        TopicTextBlock(
+            text_spans=[
+                TextSpan(text="super", is_superscript=True, bg_rgb=(1, 2, 3), raw_data={}),
+                TextSpan(text="sub", is_subscript=True, raw_data={}),
+                TextSpan(text="double", is_double_underline=True, raw_data={}),
+            ]
+        )
+    ]
+
+    output = export_html(hlp)
+
+    assert "vertical-align: super; font-size: smaller; background-color: #010203" in output
+    assert "vertical-align: sub; font-size: smaller" in output
+    assert "text-decoration: underline" in output
 
 
 @pytest.mark.parametrize("font_number", [None, 0])
