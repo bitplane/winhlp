@@ -277,10 +277,10 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         for row in table.rows:
             cells = []
             for cell in row.cells:
-                text = "".join(s.text for s in cell.text_spans)
+                content = self._render_spans(cell.text_spans)
                 align = f' style="text-align: {cell.alignment}"' if cell.alignment != "left" else ""
                 span = f' colspan="{cell.column_span}"' if cell.column_span > 1 else ""
-                cells.append(f"<td{align}{span}>{html.escape(text).replace(chr(10), '<br>')}</td>")
+                cells.append(f"<td{align}{span}>{content}</td>")
             rows.append("<tr>" + "".join(cells) + "</tr>")
         return "<table>\n" + "\n".join(rows) + "\n</table>" if rows else ""
 

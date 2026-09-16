@@ -6,6 +6,7 @@ import re
 import pytest
 from winhlp.lib.hlp import HelpFile
 from winhlp.lib.html import export_html
+from winhlp.lib.internal_files.topic import Table, TableCell, TableRow, TextSpan, TopicTableBlock
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
 
@@ -98,3 +99,32 @@ def test_html_font_names_are_safe_css_strings(face, escaped):
     assert f'font-family: "{escaped}", serif' in out
     assert out.count("</style>") == 1
     assert "svg" not in parser.tags
+
+
+def test_html_table_preserves_links_images_and_styled_paragraphs():
+    hlp = HelpFile(filepath=os.path.join(DATA, "win311/SOL.HLP"))
+    topics = hlp.get_document().topics
+    target = f"topic:TOPIC{topics[1].topic_number}"
+    spans = [
+        TextSpan(text="Open topic", is_hyperlink=True, hyperlink_target=target, raw_data={}),
+        TextSpan(text="", embedded_image="bitmap:inline:0", raw_data={}),
+        TextSpan(text="Bold <text>\nline", is_bold=True, raw_data={}),
+        TextSpan(text="\n\nParagraph", raw_data={}),
+    ]
+    table = Table(
+        rows=[
+            TableRow(cells=[TableCell(text_spans=spans, alignment="center", column_span=2, raw_data={})], raw_data={})
+        ],
+        raw_data={},
+    )
+    topics[0].content_blocks = [TopicTableBlock(table=table)]
+
+    out = export_html(hlp)
+    cell = re.search(r'<td style="text-align: center" colspan="2">(.*?)</td>', out, re.S).group(1)
+
+    assert '<a class="jump" href="#topic-1">Open topic</a>' in cell
+    assert '<img src="data:image/' in cell
+    assert 'alt="bitmap 0"' in cell
+    assert '<span class="fx">Bold &lt;text&gt;<br>line</span>' in cell
+    assert "<p>Paragraph</p>" in cell
+    assert ".fx { font-weight: bold }" in out
