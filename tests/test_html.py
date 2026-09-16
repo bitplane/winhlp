@@ -68,3 +68,33 @@ def test_html_context_hash_links_use_shared_document_resolution():
     out = export_html(hlp)
 
     assert '<a class="jump" href="#topic-1">' in out
+
+
+@pytest.mark.parametrize(
+    "face, escaped",
+    [
+        ("</style><svg onload=alert(1)>", r"\3c /style>\3c svg onload=alert(1)>"),
+        ('Font"\\\n\r\fName', r"Font\22 \5c \a \d \c Name"),
+        ("Times New Roman", "Times New Roman"),
+    ],
+)
+def test_html_font_names_are_safe_css_strings(face, escaped):
+    from html.parser import HTMLParser
+
+    class TagCollector(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tags = []
+
+        def handle_starttag(self, tag, attrs):
+            self.tags.append(tag)
+
+    hlp = HelpFile(filepath=os.path.join(DATA, "win311/SOL.HLP"))
+    hlp.font.facenames = [face] * len(hlp.font.facenames)
+    out = export_html(hlp)
+    parser = TagCollector()
+    parser.feed(out)
+
+    assert f'font-family: "{escaped}", serif' in out
+    assert out.count("</style>") == 1
+    assert "svg" not in parser.tags

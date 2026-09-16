@@ -243,6 +243,11 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         decls = []
         face = attrs.get("facename")
         if face:
+            # CSS escapes preserve the name while keeping quotes/control bytes
+            # inside the string and preventing HTML's raw-text </style> terminator.
+            face = "".join(
+                f"\\{ord(char):x} " if char in '\\"<' or ord(char) < 32 or ord(char) == 127 else char for char in face
+            )
             decls.append(f'font-family: "{face}", serif')
         hp = attrs.get("half_points")
         if hp and hp > 0:
