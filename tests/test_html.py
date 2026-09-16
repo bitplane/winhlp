@@ -153,3 +153,31 @@ def test_html_table_preserves_links_images_and_styled_paragraphs():
     assert styled is not None
     assert "<p>Paragraph</p>" in cell
     assert f".{styled.group(1)} {{ font-weight: bold }}" in out
+
+
+@pytest.mark.parametrize("directory", ["manual#1_images", 'manual" onerror="test_images', "help ?&% café_images"])
+def test_extracted_image_urls_round_trip_special_directory_names(tmp_path, directory):
+    from html.parser import HTMLParser
+    from urllib.parse import unquote, urlsplit
+
+    class Images(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.images = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "img":
+                self.images.append(dict(attrs))
+
+    hlp = HelpFile(filepath=os.path.join(DATA, "win311/SOL.HLP"))
+    output = export_html(hlp, images="extract", image_dir=str(tmp_path / directory))
+    parser = Images()
+    parser.feed(output)
+    assert parser.images
+    for attributes in parser.images:
+        assert set(attributes) <= {"src", "alt", "style"}
+        url = urlsplit(attributes["src"])
+        assert not url.scheme and not url.netloc and not url.query and not url.fragment
+        path = tmp_path / unquote(url.path)
+        assert path.parent == tmp_path / directory
+        assert path.is_file()

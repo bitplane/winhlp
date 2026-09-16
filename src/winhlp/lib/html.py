@@ -13,6 +13,7 @@ import io
 import os
 import re
 from typing import Optional
+from urllib.parse import quote
 
 from .document import parse_embedded_resource
 from .internal_files.topic import TopicTableBlock, TopicTextBlock
@@ -290,7 +291,7 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         if not src:
             return ""
         style = _IMG_STYLE.get(resource.alignment, "")  # inline -> no float
-        return f'<img{style} src="{src}" alt="{html.escape(alt)}">'
+        return f'<img{style} src="{html.escape(src, quote=True)}" alt="{html.escape(alt)}">'
 
     def _image_src(self, bitmap_file, cache_key):
         if not cache_key or not bitmap_file:
@@ -311,7 +312,8 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
                 fname = re.sub(r"[^\w.-]", "_", cache_key.lstrip("|")) + f".{ext}"
                 with open(os.path.join(self.image_dir, fname), "wb") as fh:
                     fh.write(data)
-                result = f"{os.path.basename(self.image_dir)}/{fname}"
+                directory = os.path.basename(os.path.normpath(self.image_dir))
+                result = f"{quote(directory, safe='')}/{quote(fname, safe='')}"
             else:
                 b64 = base64.b64encode(data).decode("ascii")
                 result = f"data:{mime};base64,{b64}"
