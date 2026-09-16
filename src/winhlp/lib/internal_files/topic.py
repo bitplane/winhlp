@@ -527,6 +527,7 @@ class ParsedTopic(BaseModel):
     context_names: List[str] = []  # context ids resolving to this topic
     keywords: List[str] = []  # K/A keywords attached to this topic
     annotations: List[str] = []  # user annotation text (from a sibling .ANN file)
+    user_note: str = ""  # editable note from the winhlp user-state sidecar
     browse_prev_topic: Optional[int] = None  # resolved browse-sequence neighbours
     browse_next_topic: Optional[int] = None
     raw_data: dict

@@ -35,7 +35,10 @@ sidebars, keyboard and mouse links, cross-file back/forward history, WinHelp
 browse-sequence navigation, popup and secondary-window topics, formatted tables,
 and inline bitmap/hotspot rendering with descriptive fallbacks. Press `/` to
 search, `o`/`c`/`k` to switch sidebar views, Tab/Shift-Tab to select links,
-Enter to follow one, `i`/`d`/`e` for file/topic/error details, and `q` to quit.
+Enter to follow one, `m` to toggle a bookmark, `g` to browse bookmarks, `n` to
+edit a topic note, `i`/`d`/`e` for file/topic/error details, and `q` to quit.
+Bookmarks and notes are saved beside the help file in a small
+`<filename>.user.json` sidecar; original HLP and ANN files are never modified.
 
 The HTML export is a single self-contained page: a table of contents followed by
 every topic as an anchored section, with internal jumps/popups turned into

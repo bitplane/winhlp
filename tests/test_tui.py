@@ -24,6 +24,7 @@ from winhlp.tui import (
     DiagnosticPopup,
     HelpTopicsScreen,
     InformationPopup,
+    NoteEditorScreen,
     OptionsScreen,
     TopicChoicePopup,
     TopicPopup,
@@ -32,6 +33,7 @@ from winhlp.tui import (
     _span_style,
     _span_text,
 )
+from textual.widgets import TextArea
 
 
 def test_topic_view_does_not_apply_text_link_styles_to_image_pixels():
@@ -46,6 +48,54 @@ def test_topic_view_does_not_apply_text_link_styles_to_image_pixels():
 
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
+
+
+@pytest.mark.asyncio
+async def test_bookmarks_and_notes_persist_and_are_editable(tmp_path):
+    source = tmp_path / "manual.hlp"
+    shutil.copyfile(os.path.join(DATA, "SMARTTOP.HLP"), source)
+    app = WinHlpApp(HelpFile(filepath=str(source)), show_help_topics_on_start=False)
+    bookmarked = app.navigator.current
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.press("m")
+        assert bookmarked.topic_offset in app.user_state.bookmarks
+        assert "★" in app.sub_title
+
+        await pilot.press("n")
+        await pilot.pause()
+        assert isinstance(app.screen, NoteEditorScreen)
+        app.screen.query_one("#note-text", TextArea).text = "My editable note\nwith two lines"
+        await pilot.click("#note-save")
+        await pilot.pause()
+        assert bookmarked.user_note == "My editable note\nwith two lines"
+        output = StringIO()
+        Console(file=output, width=100).print(app.query_one("#topic-view", TopicView).content)
+        assert "My editable note" in output.getvalue()
+
+        app._go_to_topic(app.document.topics[2])
+        app._show_current()
+        await pilot.press("g")
+        await pilot.pause()
+        assert isinstance(app.screen, HelpTopicsScreen)
+        assert app.screen.mode == "bookmarks"
+        assert [entry.topic for entry in app.screen.entries] == [bookmarked]
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.navigator.current is bookmarked
+
+    sidecar = tmp_path / "manual.hlp.user.json"
+    assert sidecar.is_file()
+    restarted = WinHlpApp(HelpFile(filepath=str(source)), show_help_topics_on_start=False)
+    assert restarted.navigator.current.topic_offset in restarted.user_state.bookmarks
+    assert restarted.navigator.current.user_note == "My editable note\nwith two lines"
+
+    async with restarted.run_test(size=(100, 30)) as pilot:
+        await pilot.press("n")
+        await pilot.pause()
+        await pilot.press("ctrl+d")
+        await pilot.pause()
+        assert restarted.navigator.current.user_note == ""
 
 
 @pytest.mark.asyncio
@@ -237,7 +287,7 @@ async def test_mediaview_button_is_a_macro_target_not_an_image():
         await pilot.pause()
 
         assert not any("AL(" in placeholder for placeholder in view.image_placeholders)
-        assert any(target.kind == "macro" and "AL(" in target.original for target in view.targets)
+        assert any(target.kind == "unresolved" and "AL(" in target.original for target in view.targets)
 
 
 @pytest.mark.asyncio

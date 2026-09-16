@@ -24,7 +24,20 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.theme import Theme
-from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, ListItem, ListView, Static, Tab, Tabs
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Footer,
+    Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    Static,
+    Tab,
+    Tabs,
+    TextArea,
+)
 
 from .lib.document import (
     HelpDocument,
@@ -39,6 +52,7 @@ from .lib.layout import layout_topic
 from .lib.internal_files.topic import ParsedTopic, TextSpan, TopicTableBlock, TopicTextBlock
 from .lib.raster import HalfBlockRasterizer, RasterHotspot, TerminalRasterizer, decode_bmp
 from .lib.terminal_layout import translate_paragraph
+from .lib.user_state import UserState
 
 
 WINHELP_THEME = Theme(
@@ -263,6 +277,8 @@ class TopicView(Static):
             for annotation in self.topic.annotations:
                 notes.append(f"• {annotation}\n")
             renderables.append(Panel(notes, title="Annotations"))
+        if self.topic.user_note:
+            renderables.append(Panel(Text(self.topic.user_note), title="My note"))
         self.update(Group(*renderables))
 
     def _render_text_block(self, block: TopicTextBlock) -> Iterable[RenderableType]:
@@ -713,6 +729,54 @@ class InformationPopup(ModalScreen):
         self.dismiss()
 
 
+class NoteEditorScreen(ModalScreen[Optional[tuple[str, str]]]):
+    """Edit or delete the current topic's persistent note."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+s", "save", "Save", priority=True),
+        Binding("ctrl+d", "delete", "Delete", priority=True),
+    ]
+
+    def __init__(self, title: str, note: str):
+        super().__init__()
+        self.topic_title = title
+        self.note = note
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="note-editor"):
+            yield Label(f"Note: {self.topic_title}", classes="popup-title")
+            yield TextArea(self.note, id="note-text")
+            with Horizontal(id="note-actions"):
+                yield Button("Save", id="note-save", variant="primary")
+                yield Button("Delete", id="note-delete", variant="warning")
+                yield Button("Cancel", id="note-cancel")
+            yield Label("Ctrl+S: save · Ctrl+D: delete · Esc: cancel", id="popup-hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#note-text", TextArea).focus()
+
+    @on(Button.Pressed)
+    def button_pressed(self, event: Button.Pressed) -> None:
+        actions = {
+            "note-save": self.action_save,
+            "note-delete": self.action_delete,
+            "note-cancel": self.action_cancel,
+        }
+        action = actions.get(event.button.id)
+        if action:
+            action()
+
+    def action_save(self) -> None:
+        self.dismiss(("save", self.query_one("#note-text", TextArea).text))
+
+    def action_delete(self) -> None:
+        self.dismiss(("delete", ""))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class TopicChoiceList(ListView):
     def on_key(self, event: events.Key) -> None:
         if event.key == "enter":
@@ -774,10 +838,11 @@ class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
         Binding("enter", "choose", "Display", priority=True),
     ]
 
-    def __init__(self, document: HelpDocument, initial: str = "contents"):
+    def __init__(self, document: HelpDocument, initial: str = "contents", user_state: Optional[UserState] = None):
         super().__init__()
         self.document = document
-        self.mode = initial if initial in ("contents", "index") else "contents"
+        self.user_state = user_state or UserState.for_help_file(document.helpfile.filepath)
+        self.mode = initial if initial in ("contents", "index", "bookmarks") else "contents"
         self.show_all_topics = not document.has_authored_contents
         self.all_entries: list[NavigationEntry] = []
         self.entries: list[NavigationEntry] = []
@@ -788,6 +853,7 @@ class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
             yield Tabs(
                 Tab("Contents", id="contents"),
                 Tab("Index", id="index"),
+                Tab("Bookmarks", id="bookmarks"),
                 active=self.mode,
                 id="help-tabs",
             )
@@ -816,7 +882,22 @@ class HelpTopicsScreen(ModalScreen[Optional[NavigationEntry]]):
         search = self.query_one("#help-index-search", Input)
         show_all = self.query_one("#help-show-all", Checkbox)
         instructions = self.query_one("#help-instructions", Label)
-        if mode == "index":
+        if mode == "bookmarks":
+            show_all.display = False
+            search.display = False
+            self.all_entries = []
+            for bookmark in self.user_state.bookmarks.values():
+                topic = self.document.topic_for_offset(bookmark.topic_offset)
+                if topic is not None:
+                    self.all_entries.append(
+                        NavigationEntry(
+                            bookmark.title or topic.title or "Untitled topic", topic, kind="bookmark", source="USER"
+                        )
+                    )
+            self.entries = sorted(self.all_entries, key=lambda entry: entry.label.casefold())
+            instructions.update("Choose a saved bookmark, then press Enter.")
+            self.run_worker(self._replace_entries(), group="help-entries", exclusive=True)
+        elif mode == "index":
             show_all.display = False
             self.all_entries = self.document.index_entries()
             search.display = True
@@ -1001,7 +1082,9 @@ class WinHlpApp(App):
         align: center middle;
         background: $background 70%;
     }
-    #popup, #diagnostic { width: 80%; height: 80%; padding: 1 2; border: heavy $accent; background: $surface; }
+    #popup, #diagnostic, #note-editor { width: 80%; height: 80%; padding: 1 2; border: heavy $accent; background: $surface; }
+    #note-text { height: 1fr; }
+    #note-actions { height: 3; }
     #help-topics { width: 82%; height: 86%; padding: 1 2; border: heavy $primary; background: $panel; }
     #help-tabs { height: 3; }
     #help-instructions { height: 2; padding: 0 1; }
@@ -1033,6 +1116,9 @@ class WinHlpApp(App):
         Binding("o", "show_topics", "Help Topics", show=False),
         Binding("c", "show_contents", "Contents", show=False),
         Binding("k", "show_index", "Index", show=False),
+        Binding("g", "show_bookmarks", "Bookmarks", show=False),
+        Binding("m", "toggle_bookmark", "Bookmark"),
+        Binding("n", "edit_note", "Edit note", show=False),
         Binding("i", "file_information", "File info", show=False),
         Binding("d", "topic_details", "Topic details", show=False),
         Binding("e", "parse_errors", "Errors", show=False),
@@ -1048,6 +1134,7 @@ class WinHlpApp(App):
         self.helpfile = helpfile
         self.show_help_topics_on_start = show_help_topics_on_start
         self.document = helpfile.get_document()
+        self.user_state = self._load_user_state(helpfile, self.document)
         self.navigator = HelpNavigator(self.document)
         self.document_back_stack: list[tuple[HelpFile, HelpDocument, HelpNavigator]] = []
         self.document_forward_stack: list[tuple[HelpFile, HelpDocument, HelpNavigator]] = []
@@ -1141,7 +1228,27 @@ class WinHlpApp(App):
             return
         position = self.document.topics.index(current) + 1
         warning = f" · ⚠ {len(self.helpfile.parse_errors)}" if self.helpfile.parse_errors else ""
-        self.sub_title = f"{os.path.basename(self.helpfile.filepath)} · {position}/{len(self.document.topics)}{warning}"
+        bookmarked = " · ★" if current.topic_offset in self.user_state.bookmarks else ""
+        self.sub_title = (
+            f"{os.path.basename(self.helpfile.filepath)} · {position}/{len(self.document.topics)}{bookmarked}{warning}"
+        )
+
+    @staticmethod
+    def _load_user_state(helpfile: HelpFile, document: HelpDocument) -> UserState:
+        state = UserState.for_help_file(helpfile.filepath)
+        for topic in document.topics:
+            topic.user_note = state.notes.get(topic.topic_offset, "") if topic.topic_offset is not None else ""
+        if state.diagnostic:
+            helpfile.parse_errors.append({"file": state.path.name, "error": state.diagnostic})
+        return state
+
+    def _save_user_state(self) -> bool:
+        try:
+            self.user_state.save()
+            return True
+        except OSError as error:
+            self.push_screen(DiagnosticPopup(f"Could not save {self.user_state.path.name}: {error}"))
+            return False
 
     def action_follow_link(self, index: int) -> None:
         targets = self._all_targets()
@@ -1271,6 +1378,7 @@ class WinHlpApp(App):
     def _switch_document(self, helpfile: HelpFile, document: HelpDocument, navigator: HelpNavigator) -> None:
         self.helpfile = helpfile
         self.document = document
+        self.user_state = self._load_user_state(helpfile, document)
         self.navigator = navigator
         self.title = help_title(helpfile)
         self.sidebar_entries = self._filter_sidebar_entries("")
@@ -1377,6 +1485,32 @@ class WinHlpApp(App):
     def action_show_index(self) -> None:
         self._show_help_topics("index")
 
+    def action_show_bookmarks(self) -> None:
+        self._show_help_topics("bookmarks")
+
+    def action_toggle_bookmark(self) -> None:
+        topic = self.navigator.current
+        if topic is None or topic.topic_offset is None:
+            return
+        self.user_state.toggle_bookmark(topic)
+        self._save_user_state()
+        self._update_subtitle()
+
+    def action_edit_note(self) -> None:
+        topic = self.navigator.current
+        if topic is not None and topic.topic_offset is not None:
+            self.push_screen(NoteEditorScreen(topic.title or "Untitled topic", topic.user_note), self._note_edited)
+
+    def _note_edited(self, result: Optional[tuple[str, str]]) -> None:
+        topic = self.navigator.current
+        if result is None or topic is None or topic.topic_offset is None:
+            return
+        _action, text = result
+        self.user_state.set_note(topic.topic_offset, text)
+        topic.user_note = self.user_state.notes.get(topic.topic_offset, "")
+        self._save_user_state()
+        self._show_current()
+
     def action_show_options(self) -> None:
         self.push_screen(OptionsScreen(), self._option_chosen)
 
@@ -1391,7 +1525,7 @@ class WinHlpApp(App):
             self.action_change_theme()
 
     def _show_help_topics(self, initial: str) -> None:
-        self.push_screen(HelpTopicsScreen(self.document, initial), self._help_entry_chosen)
+        self.push_screen(HelpTopicsScreen(self.document, initial, self.user_state), self._help_entry_chosen)
 
     def _help_entry_chosen(self, entry: Optional[NavigationEntry]) -> None:
         if entry is not None:
@@ -1574,6 +1708,8 @@ class WinHlpApp(App):
             "Unresolved targets: " + (", ".join(dict.fromkeys(unresolved)) or "(none)"),
             f"Annotations ({len(topic.annotations)}):",
             *(f"  {annotation}" for annotation in topic.annotations),
+            f"My note: {topic.user_note or '(none)'}",
+            f"Bookmarked: {'yes' if topic.topic_offset in self.user_state.bookmarks else 'no'}",
         ]
         if resources:
             lines.append("Resource details:")
