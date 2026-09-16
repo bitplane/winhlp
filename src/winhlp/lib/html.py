@@ -63,6 +63,7 @@ class HtmlExporter:
         self._style_class: dict = {}  # effective CSS rules -> css class name
         self._css_rules: dict = {}  # class name -> css body
         self._image_cache: dict = {}  # picture number -> <img> src or None
+        self._image_map_count = 0
 
     # -- public ------------------------------------------------------------
 
@@ -287,11 +288,37 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         else:  # window: extract the filename from "DLL, Class, [!]Param"
             key = resource.resource_name
             alt = key or ""
-        src = self._image_src(bitmaps.get(key), key)
+        bitmap_file = bitmaps.get(key)
+        src = self._image_src(bitmap_file, key)
         if not src:
             return ""
         style = _IMG_STYLE.get(resource.alignment, "")  # inline -> no float
-        return f'<img{style} src="{html.escape(src, quote=True)}" alt="{html.escape(alt)}">'
+        image_map = self._render_image_map(bitmap_file)
+        usemap = f' usemap="#{image_map[0]}"' if image_map else ""
+        image = f'<img{style}{usemap} src="{html.escape(src, quote=True)}" alt="{html.escape(alt)}">'
+        return image + image_map[1] if image_map else image
+
+    def _render_image_map(self, bitmap_file):
+        """Render clickable SHG/MRB rectangles with the shared link resolver."""
+        pictures = getattr(bitmap_file, "bitmaps", ()) if bitmap_file else ()
+        hotspots = getattr(pictures[0], "hotspots", ()) if pictures else ()
+        if not hotspots:
+            return None
+        name = f"image-map-{self._image_map_count}"
+        self._image_map_count += 1
+        areas = []
+        for hotspot in hotspots:
+            x2 = hotspot.x + max(0, hotspot.width)
+            y2 = hotspot.y + max(0, hotspot.height)
+            target = self.document.resolve_bitmap_hotspot(hotspot)
+            anchor = self._topic_to_anchor.get(id(target.topic)) if target.topic is not None else None
+            href = f' href="#{anchor}"' if anchor else ""
+            label = hotspot.name or target.detail or hotspot.target or "image hotspot"
+            areas.append(
+                f'<area shape="rect" coords="{hotspot.x},{hotspot.y},{x2},{y2}"{href} '
+                f'alt="{html.escape(label, quote=True)}" title="{html.escape(label, quote=True)}">'
+            )
+        return name, f'<map name="{name}">{"".join(areas)}</map>'
 
     def _image_src(self, bitmap_file, cache_key):
         if not cache_key or not bitmap_file:

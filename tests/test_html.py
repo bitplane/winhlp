@@ -6,6 +6,7 @@ import re
 import pytest
 from winhlp.lib.hlp import HelpFile
 from winhlp.lib.html import export_html
+from winhlp.lib.internal_files.bitmap import HotspotInfo
 from winhlp.lib.internal_files.topic import Table, TableCell, TableRow, TextSpan, TopicTableBlock, TopicTextBlock
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
@@ -69,6 +70,48 @@ def test_html_context_hash_links_use_shared_document_resolution():
     out = export_html(hlp)
 
     assert '<a class="jump" href="#topic-1">' in out
+
+
+def test_html_bitmap_hotspots_render_accessible_image_map():
+    hlp = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP"))
+    topic = hlp.get_topics()[1]
+
+    def hotspot(kind, target, name, x, hash_value=0):
+        return HotspotInfo(
+            id0=0,
+            id1=0,
+            id2=0,
+            x=x,
+            y=2,
+            width=10,
+            height=5,
+            hash_value=hash_value,
+            hotspot_type=kind,
+            target=target,
+            name=name,
+            raw_data={},
+        )
+
+    hlp.bitmaps["|bm0"].bitmaps[0].hotspots = [
+        hotspot("topic", topic.context_names[0], 'Named "jump"', 1),
+        hotspot("popup", "", "Hash popup", 20, 0x427),
+        hotspot("macro", f'JI("{topic.context_names[0]}")', "Macro jump", 40),
+        hotspot("external_jump", "CTX@other.hlp", "External jump", 60),
+    ]
+    hlp.get_topics()[0].content_blocks = [
+        TopicTextBlock(text_spans=[TextSpan(text="", embedded_image="bitmap:inline:0", raw_data={})])
+    ]
+
+    output = export_html(hlp)
+
+    assert '<img usemap="#image-map-0"' in output
+    assert '<map name="image-map-0">' in output
+    assert 'coords="1,2,11,7" href="#topic-1" alt="Named &quot;jump&quot;"' in output
+    assert 'coords="20,2,30,7" href="#topic-1" alt="Hash popup"' in output
+    assert 'coords="40,2,50,7" href="#topic-1" alt="Macro jump"' in output
+    external = re.search(r'<area[^>]+coords="60,2,70,7"[^>]+>', output).group(0)
+    assert "href=" not in external
+    assert 'alt="External jump"' in external
 
 
 @pytest.mark.parametrize("font_number", [None, 0])
