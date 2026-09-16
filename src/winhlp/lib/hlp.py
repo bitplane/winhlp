@@ -326,13 +326,12 @@ class HelpFile(BaseModel):
             data = entry.get("data")
             if not btree or not data or not getattr(btree, "keyword_map", None):
                 continue
-            offsets = getattr(data, "topic_offsets", []) or []
             for keyword, leaf in btree.keyword_map.items():
                 start = getattr(leaf, "kw_data_offset", None)
                 count = getattr(leaf, "count", 0)
                 if start is None:
                     continue
-                for off in offsets[start : start + count]:
+                for off in data.get_topic_offsets_range(start, count):
                     index.setdefault(off, []).append(f"{char}:{keyword}")
         return index
 

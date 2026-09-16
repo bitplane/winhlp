@@ -146,3 +146,10 @@ def test_context_names_and_keywords_attached():
     # The |KWBTREE parses (regression: it used to be silently empty).
     assert len(hlp.keyword_search_files["K"]["btree"].keyword_map) > 100
     assert any(t.keywords for t in topics)
+
+
+def test_keyword_cross_references_use_byte_offsets():
+    hlp = HelpFile(filepath=os.path.join(DATA, "FXUNDEL.HLP"))
+    index = hlp._keyword_offset_index()
+
+    assert [offset for offset, keywords in index.items() if "K:Application window" in keywords] == [4623]
