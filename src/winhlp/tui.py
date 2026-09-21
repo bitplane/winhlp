@@ -50,7 +50,7 @@ from .lib.document import (
 from .lib.hlp import HelpFile
 from .lib.layout import layout_topic
 from .lib.internal_files.topic import ParsedTopic, TextSpan, TopicTableBlock, TopicTextBlock
-from .lib.raster import HalfBlockRasterizer, RasterHotspot, TerminalRasterizer, decode_bmp
+from .lib.raster import HalfBlockRasterizer, RasterHotspot, TerminalRasterizer, decode_image
 from .lib.terminal_layout import translate_paragraph
 from .lib.user_state import UserState
 
@@ -416,7 +416,10 @@ class TopicView(Static):
             bitmap_file = bitmaps.get("|" + label)
         picture_index = bitmap_file.select_picture(target_width) if bitmap_file is not None else 0
         extracted = bitmap_file.extract_image(picture_index) if bitmap_file is not None else None
-        image = decode_bmp(extracted[1]) if extracted and extracted[0] == "bmp" else None
+        image = None
+        if extracted:
+            header = bitmap_file.bitmaps[picture_index].header
+            image = decode_image(extracted[1], extracted[0], (header.width, header.height))
         return label, bitmap_file, picture_index, extracted, image
 
     def _render_inline_image(

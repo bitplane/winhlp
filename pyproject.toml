@@ -1,16 +1,17 @@
 [project]
 name = "winhlp"
 description = "Windows HLP file TUI and library"
-version = "0.3.2"
+version = "0.4.0"
 authors = [
     { name = "Gareth Davidson", email = "gaz@bitplane.net" }
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 
 dependencies = [
     "pydantic",
     "textual>=0.84",
+    "pillow-wmf>=0.1.0",
 ]
 
 [project.urls]
@@ -23,7 +24,7 @@ winhlp = "winhlp.__main__:main"
 
 [project.optional-dependencies]
 html = [
-    "pillow"  # optional: convert extracted bitmaps to PNG for --html output
+    "pillow"  # retained for compatibility; pillow-wmf already requires Pillow
 ]
 dev = [
     "pre-commit",
@@ -44,7 +45,7 @@ requires = ["flit_core >=3.2,<4"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py313"
 
 [tool.ruff.format]
 docstring-code-format = true

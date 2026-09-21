@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import struct
+import io
 from dataclasses import dataclass
 from typing import Optional, Protocol, Sequence
 
+import pillow_wmf  # noqa: F401 - registers Pillow's WMF loader
+from PIL import Image
 from rich.style import Style
 from rich.text import Text
 
@@ -46,6 +49,34 @@ class TerminalRasterizer(Protocol):
         hotspots: Sequence[RasterHotspot] = (),
         selected_hotspot: int = -1,
     ) -> Text: ...
+
+
+def load_wmf(data: bytes, size: Optional[tuple[int, int]] = None):
+    """Rasterize a WMF with its container dimensions, or return None on failure.
+
+    Plain WMFs have no intrinsic pixel dimensions. Retaining the container's
+    canvas also keeps image hotspots in the same coordinate system.
+    """
+    try:
+        with Image.open(io.BytesIO(data), formats=["WMF"]) as image:
+            image.load(size=size if size and min(size) > 0 else None)
+            return image.convert("RGB")
+    except Exception:
+        # Malformed data and unsupported records use the
+        # same descriptive fallback as unsupported bitmap formats.
+        return None
+
+
+def decode_image(data: bytes, extension: str, size: Optional[tuple[int, int]] = None) -> Optional[RasterImage]:
+    """Decode an extracted BMP or WMF for terminal rendering."""
+    if extension == "bmp":
+        return decode_bmp(data)
+    if extension == "wmf":
+        image = load_wmf(data, size)
+        if image is not None:
+            with image:
+                return RasterImage(image.width, image.height, tuple(image.get_flattened_data()))
+    return None
 
 
 def decode_bmp(data: bytes) -> Optional[RasterImage]:

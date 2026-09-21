@@ -15,29 +15,27 @@ import re
 from typing import Optional
 from urllib.parse import quote
 
+from PIL import Image
+
 from .document import parse_embedded_resource
 from .internal_files.topic import TopicTableBlock, TopicTextBlock
 from .layout import layout_topic
-
-try:
-    from PIL import Image
-
-    _HAVE_PIL = True
-except ImportError:  # pragma: no cover - optional dependency
-    _HAVE_PIL = False
+from .raster import load_wmf
 
 
-def _to_png(data: bytes, ext: str) -> tuple:
-    """Convert a decoded bitmap to PNG when Pillow is available.
+def _to_png(data: bytes, ext: str, size: Optional[tuple[int, int]] = None) -> tuple:
+    """Convert a decoded bitmap or metafile to PNG.
 
     PNG is smaller (our BMPs are uncompressed) and renders everywhere; if Pillow
-    is missing or can't decode the image (e.g. a WMF metafile) we keep the
-    original bytes. Returns (bytes, ext).
+    can't decode the image we keep the original bytes. Returns (bytes, ext).
     """
-    if not _HAVE_PIL or ext != "bmp":
+    if ext not in ("bmp", "wmf"):
         return data, ext
     try:
-        with Image.open(io.BytesIO(data)) as img:
+        img = load_wmf(data, size) if ext == "wmf" else Image.open(io.BytesIO(data))
+        if img is None:
+            return data, ext
+        with img:
             buf = io.BytesIO()
             img.save(buf, format="PNG", optimize=True)
             return buf.getvalue(), "png"
@@ -388,7 +386,8 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
             extracted = None
         if extracted:
             ext, data = extracted
-            data, ext = _to_png(data, ext)
+            header = bitmap_file.bitmaps[0].header
+            data, ext = _to_png(data, ext, (header.width, header.height))
             mime = {"bmp": "image/bmp", "wmf": "image/wmf", "png": "image/png"}.get(ext, "application/octet-stream")
             if self.images == "extract" and self.image_dir:
                 os.makedirs(self.image_dir, exist_ok=True)

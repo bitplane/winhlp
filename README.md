@@ -16,9 +16,11 @@ GPL licensed.
 ## Install
 
 ```sh
-pip install winhlp          # parser + terminal viewer
-pip install winhlp[html]    # + Pillow, for PNG images in HTML export
+pip install winhlp
 ```
+
+Requires Python 3.13+. `pillow-wmf` renders WMF images in the terminal viewer
+and converts them to PNG in HTML exports.
 
 ## Command line
 
