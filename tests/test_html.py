@@ -196,7 +196,7 @@ def test_html_preserves_fixed_regions_and_paragraph_layout():
     assert "border-bottom: 2px double currentColor" in fixed
 
 
-def test_html_preserves_superscript_subscript_background_and_double_underline():
+def test_html_preserves_superscript_subscript_and_double_underline():
     hlp = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP"))
     hlp.font = None
     hlp.get_topics()[0].content_blocks = [
@@ -211,7 +211,9 @@ def test_html_preserves_superscript_subscript_background_and_double_underline():
 
     output = export_html(hlp)
 
-    assert "vertical-align: super; font-size: smaller; background-color: #010203" in output
+    assert "vertical-align: super; font-size: smaller" in output
+    # WinHelp ignores the font background colour, so it is not rendered.
+    assert "background-color" not in output
     assert "vertical-align: sub; font-size: smaller" in output
     assert "text-decoration: underline" in output
 
@@ -326,3 +328,9 @@ def test_extracted_image_urls_round_trip_special_directory_names(tmp_path, direc
         path = tmp_path / unquote(url.path)
         assert path.parent == tmp_path / directory
         assert path.is_file()
+
+
+def test_html_omits_default_font_colour_marker():
+    output = export_html(HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")))
+    assert "#010100" not in output
+    assert "color: #ff0000" in output

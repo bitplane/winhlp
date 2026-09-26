@@ -306,9 +306,8 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         fg = attrs.get("fg_rgb")
         if fg and fg != (0, 0, 0):
             decls.append("color: #%02x%02x%02x" % fg)
-        bg = attrs.get("bg_rgb") or span.bg_rgb
-        if bg and bg != (255, 255, 255):
-            decls.append("background-color: #%02x%02x%02x" % bg)
+        # The font background colour is ignored by WinHelp ("unused background
+        # RGB values" in the format docs), so it is not rendered either.
         return "; ".join(decls)
 
     # -- tables ------------------------------------------------------------

@@ -6,6 +6,10 @@ from typing import List, Tuple, Optional, Any
 import struct
 
 
+# FGRGB/BGRGB value the help compiler writes when no colour was set.
+DEFAULT_RGB = (1, 1, 0)
+
+
 class FontHeader(BaseModel):
     """
     Structure at the beginning of the |FONT file.
@@ -227,8 +231,11 @@ class FontFile(InternalFile):
             }
             facename_index = getattr(d, "font_name", -1)
 
-        attrs["fg_rgb"] = d.fg_rgb
-        attrs["bg_rgb"] = d.bg_rgb
+        # 01 01 00 is the help compiler's "default colour" marker (it is in
+        # nearly every file, distinct from explicit black 00 00 00), so it
+        # resolves to None rather than a near-black colour.
+        attrs["fg_rgb"] = None if d.fg_rgb == DEFAULT_RGB else d.fg_rgb
+        attrs["bg_rgb"] = None if d.bg_rgb == DEFAULT_RGB else d.bg_rgb
         if 0 <= facename_index < len(self.facenames):
             attrs["facename"] = self.facenames[facename_index]
         return attrs
