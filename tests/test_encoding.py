@@ -1,6 +1,7 @@
 """Regression tests for metadata-driven Windows code-page selection."""
 
 import struct
+from pathlib import Path
 
 from winhlp.lib.internal_files.system import SystemFile
 
@@ -55,3 +56,15 @@ def test_90_byte_window_record_uses_secwindow_layout():
     assert (info["x"], info["y"], info["width"], info["height"]) == (653, 102, 360, 600)
     assert info["rgb"] == 0x00E2FFFF
     assert info["rgb_nsr"] == 0x00C0C0C0
+
+
+def test_ansi_charset_does_not_override_lcid_code_page():
+    # Japanese files carry LCID 0x411 plus CHARSET 0; the charset is a default.
+    from winhlp.lib.hlp import HelpFile
+
+    system = HelpFile(filepath=str(Path(__file__).parent / "data" / "SMARTTOP.HLP")).system
+    system._update_encoding_from_lcid(0x411)
+    system._update_encoding_from_charset(0)
+    assert system.encoding == "cp932"
+    system._update_encoding_from_charset(204)
+    assert system.encoding == "cp1251"

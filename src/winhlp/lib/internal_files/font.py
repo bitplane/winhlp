@@ -317,7 +317,9 @@ class FontFile(InternalFile):
             if null_pos != -1:
                 facename_bytes = facename_bytes[:null_pos]
 
-            facename = facename_bytes.decode("ascii", errors="ignore")
+            # Facenames use the file's code page (e.g. Japanese "ＭＳ 明朝").
+            encoding = getattr(self.system_file, "encoding", None) or "cp1252"
+            facename = facename_bytes.decode(encoding, errors="replace")
             self.facenames.append(facename)
             offset += entry_length
 

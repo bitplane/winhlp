@@ -1128,8 +1128,8 @@ class TopicFile(InternalFile):
         From helpdeco.c TopicPhraseRead:
         - If DataLen2 <= BlockSize-DataLen1: no phrase compression
         - If DataLen2 > BlockSize-DataLen1: use phrase compression
-        - If |Phrases file exists: use old-style phrase compression
         - If |PhrIndex and |PhrImage exist: use Hall compression
+        - Else if |Phrases exists: use old-style phrase compression
         """
         # Following helpdeco.c: if (Length <= NumBytes) /* no phrase compression */
         # DataLen2 handling follows C code - if DataLen2 < BlockSize - DataLen1,
@@ -1142,19 +1142,19 @@ class TopicFile(InternalFile):
         if self.system_file and self.system_file.parent_hlp is not None:
             hlp_file = self.system_file.parent_hlp
 
-            if "|Phrases" in hlp_file.directory.files:
-                # Old-style phrase compression
-                from ..compression import phrase_decompress
-
-                phrases = hlp_file.phrase.phrases if hlp_file.phrase else []
-                return phrase_decompress(data, phrases, self.system_file.encoding)
-
-            elif "|PhrIndex" in hlp_file.directory.files and "|PhrImage" in hlp_file.directory.files:
-                # Hall compression
+            # helpdeco's PhraseLoad prefers Hall compression: some files carry a
+            # stale |Phrases next to the |PhrIndex/|PhrImage pair actually used.
+            if "|PhrIndex" in hlp_file.directory.files and "|PhrImage" in hlp_file.directory.files:
                 from ..compression import hall_decompress
 
                 phrases = hlp_file.phrindex.phrase_bytes if hlp_file.phrindex else []
                 return hall_decompress(data, phrases, self.system_file.encoding)
+
+            if "|Phrases" in hlp_file.directory.files:
+                from ..compression import phrase_decompress
+
+                phrases = hlp_file.phrase.phrases if hlp_file.phrase else []
+                return phrase_decompress(data, phrases, self.system_file.encoding)
 
         # Fallback: no phrase compression - data is stored uncompressed
         return data[:data_len2]

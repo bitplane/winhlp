@@ -410,6 +410,10 @@ class SystemFile(InternalFile):
             238: "cp1250",  # EASTEUROPE_CHARSET
         }
 
+        # ANSI/DEFAULT (0/1) say nothing specific, so they must not override a
+        # code page already chosen from the LCID (e.g. Japanese 0x411 + charset 0).
+        if charset in (0, 1):
+            return
         if charset in charset_to_encoding:
             self.encoding = charset_to_encoding[charset]
 
