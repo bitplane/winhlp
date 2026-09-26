@@ -92,8 +92,8 @@ def test_zero_width_macro_button_is_retained_as_embedded_object():
 
 # Character formatting is resolved from the |FONT descriptor referenced by each
 # span's font_number (bold/italic/underline/size/facename), not the command
-# stream. Guard that spans in 3.1/95 files carry resolved attributes.
-@pytest.mark.parametrize("path", ["SMARTTOP.HLP", "win311/SOL.HLP", "win95/WINDOWS.HLP"])
+# stream. Guard that spans in 3.0/3.1/95 files carry resolved attributes.
+@pytest.mark.parametrize("path", ["FXUNDEL.HLP", "SMARTTOP.HLP", "win311/SOL.HLP", "win95/WINDOWS.HLP"])
 def test_font_attributes_resolved(path):
     topics = _topics_text(path)[0]
     spans = [s for t in topics for s in t.text_spans]
@@ -102,6 +102,16 @@ def test_font_attributes_resolved(path):
     faced = [s for s in spans if s.facename]
     assert faced, "expected resolved facenames"
     assert all(8 <= s.font_half_points <= 200 for s in faced if s.font_half_points)
+
+
+def test_win30_display_records_carry_formatting_and_links():
+    # TL_DISPLAY30 records share TL_DISPLAY's command stream (minus TopicLength),
+    # so 3.0 topics get fonts, paragraphs and hotspots like 3.1 ones.
+    spans = _topics_text("FXUNDEL.HLP")[0][0].text_spans
+    assert spans[0].text == "F/X File Undelete Help Index\n\n"
+    assert spans[0].is_bold and spans[0].facename == "Helv"
+    link = next(s for s in spans if s.text == "Menu and Command Keys")
+    assert link.is_hyperlink and link.hyperlink_target.startswith("topic:")
 
 
 def test_paragraph_infos_retained_per_paragraph():

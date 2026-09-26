@@ -1127,14 +1127,14 @@ class TopicFile(InternalFile):
                 record_offset,
             )
         elif link.record_type == 0x01:  # TL_DISPLAY30 (Windows 3.0)
-            paragraph_info = self._parse_paragraph_info_30(link_data1)
+            # Same layout as TL_DISPLAY minus the TopicLength word, so it goes
+            # through the same command/text interleaving (helpdeco.c:3352-3362).
+            paragraph_info = self._parse_paragraph_info(link_data1, has_topic_length=False)
             link.text_content = self._decode_text(
                 self._parse_link_data2(link_data2, link.data_len2, link.block_size, link.data_len1)
             )
-            # For Windows 3.0, use the old parsing method for now
-            # TODO: Implement Windows 3.0 specific interleaved parsing if needed
-            text_spans, hotspot_mappings = self._parse_text_content(
-                link_data2, link.data_len2, link.block_size, link.data_len1
+            text_spans, hotspot_mappings = self._parse_topic_content_interleaved(
+                self.remaining_linkdata1, link_data2, link.data_len2, link.block_size, link.data_len1
             )
             self._add_content_to_current_topic(
                 text_spans,
@@ -1265,9 +1265,11 @@ class TopicFile(InternalFile):
         # Fallback: no phrase compression - data is stored uncompressed
         return data[:data_len2]
 
-    def _parse_paragraph_info(self, data: bytes):
+    def _parse_paragraph_info(self, data: bytes, has_topic_length: bool = True):
         """
         Parses the ParagraphInfo structure using compressed integers.
+
+        TL_DISPLAY30 records have no TopicLength word (``has_topic_length=False``).
         """
         offset = 0
         start_offset = offset
@@ -1276,7 +1278,9 @@ class TopicFile(InternalFile):
         # (helpdeco.c: `scanlong(&ptr); x1 = scanword(&ptr);`). Reading TopicSize
         # as a raw 4-byte long over-consumes and desyncs the whole command stream.
         topic_size, offset = self.scan_long(data, offset)
-        topic_length, offset = self.scan_word(data, offset)
+        topic_length = 0
+        if has_topic_length:
+            topic_length, offset = self.scan_word(data, offset)
 
         # Four raw bytes precede the attribute bits (helpdeco.c `ptr += 4`):
         #   unsigned char unknownUnsignedChar
@@ -1820,263 +1824,6 @@ class TopicFile(InternalFile):
             current_topic.paragraph_infos.append(paragraph_info)
             if not current_topic.paragraph_info:
                 current_topic.paragraph_info = paragraph_info
-
-    def _parse_paragraph_info_30(self, data: bytes) -> Optional[ParagraphInfo]:
-        """Parse paragraph info for Windows 3.0 format."""
-        # Windows 3.0 has a simpler paragraph info structure
-        if len(data) < 8:
-            return None
-
-        topic_size = struct.unpack_from("<l", data, 0)[0]
-        topic_length = struct.unpack_from("<H", data, 4)[0]
-
-        # Create minimal paragraph info for Windows 3.0
-        bits = ParagraphInfoBits(
-            unknown_follows=False,
-            spacing_above_follows=False,
-            spacing_below_follows=False,
-            spacing_lines_follows=False,
-            left_indent_follows=False,
-            right_indent_follows=False,
-            firstline_indent_follows=False,
-            unused=False,
-            borderinfo_follows=False,
-            tabinfo_follows=False,
-            right_aligned_paragraph=False,
-            center_aligned_paragraph=False,
-        )
-
-        return ParagraphInfo(
-            topic_size=topic_size,
-            topic_length=topic_length,
-            bits=bits,
-            raw_data={"raw": data[:8], "parsed": {"topic_size": topic_size, "topic_length": topic_length}},
-        )
-
-    def _parse_text_content(
-        self, data: bytes, data_len2: int, block_size: int, data_len1: int
-    ) -> tuple[List[TextSpan], List[HotspotMapping]]:
-        """Parse text content into structured text spans with rich formatting commands.
-
-        Enhanced to handle all formatting commands from helpdeco.c analysis:
-        - 0x80-0x8C: Font formatting (bold, italic, underline, etc.)
-        - 0x86-0x88: Embedded bitmap positioning commands (bmc, bml, bmr, ewc, ewl, ewr)
-        - 0xEE-0xEF: Embedded image commands (bmc, bml, bmr)
-        """
-        # Get the decompressed raw bytes - do NOT decode to string yet
-        raw_content = self._parse_link_data2(data, data_len2, block_size, data_len1)
-        if not raw_content:
-            return [], []
-
-        text_spans = []
-        hotspot_mappings = []
-        current_text_bytes = bytearray()  # Accumulate raw bytes, decode later
-        current_font = None
-        current_formatting = {
-            "bold": False,
-            "italic": False,
-            "underline": False,
-            "strikethrough": False,
-            "superscript": False,
-            "subscript": False,
-            "hyperlink": False,
-            "hyperlink_target": None,
-            "embedded_image": None,
-        }
-
-        # Track hotspot state
-        hotspot_start_position = 0
-        total_text_position = 0
-        hotspot_active = False
-
-        def finish_current_span():
-            """Helper to finish current text span and start a new one."""
-            nonlocal current_text_bytes, total_text_position, hotspot_active, hotspot_start_position
-            if current_text_bytes:
-                # Decode accumulated bytes to text
-                current_text = self._decode_text(bytes(current_text_bytes))
-                span_index = len(text_spans)
-
-                # Create hotspot mapping if we're in a hotspot
-                if hotspot_active and current_formatting["hyperlink"] and current_formatting["hyperlink_target"]:
-                    hotspot_type = "jump"  # Default
-                    target = current_formatting["hyperlink_target"]
-
-                    # Determine hotspot type from target format
-                    if target.startswith("popup:"):
-                        hotspot_type = "popup"
-                        target = target[6:]  # Remove "popup:" prefix
-                    elif target.startswith("macro:"):
-                        hotspot_type = "macro"
-                        target = target[6:]  # Remove "macro:" prefix
-                    elif target.startswith("topic:"):
-                        hotspot_type = "jump"
-                        target = target[6:]  # Remove "topic:" prefix
-
-                    hotspot_mapping = HotspotMapping(
-                        text_span_index=span_index,
-                        hotspot_type=hotspot_type,
-                        target=target,
-                        display_text=current_text,
-                        start_position=hotspot_start_position,
-                        end_position=total_text_position + len(current_text),
-                        raw_data={"original_target": current_formatting["hyperlink_target"], "span_index": span_index},
-                    )
-                    hotspot_mappings.append(hotspot_mapping)
-
-                text_spans.append(
-                    TextSpan(
-                        text=current_text,
-                        font_number=current_font,
-                        is_bold=current_formatting["bold"],
-                        is_italic=current_formatting["italic"],
-                        is_underline=current_formatting["underline"],
-                        is_strikethrough=current_formatting["strikethrough"],
-                        is_superscript=current_formatting["superscript"],
-                        is_subscript=current_formatting["subscript"],
-                        is_hyperlink=current_formatting["hyperlink"],
-                        hyperlink_target=current_formatting["hyperlink_target"],
-                        embedded_image=current_formatting["embedded_image"],
-                        raw_data={
-                            "type": "text",
-                            "span_index": span_index,
-                        },
-                    )
-                )
-                total_text_position += len(current_text)
-                current_text_bytes.clear()
-
-        i = 0
-        while i < len(raw_content):
-            byte_value = raw_content[i]
-
-            # Special character and command codes (0x80-0x8C range)
-            if byte_value == 0x80:  # Font change
-                finish_current_span()
-                if i + 1 < len(raw_content):
-                    font_number = raw_content[i + 1]
-                    current_font = font_number  # Index into font table
-                    i += 2
-                else:
-                    i += 1
-                continue
-            elif byte_value == 0x81:  # Line break
-                finish_current_span()
-                current_text_bytes.extend(b"\n")
-                i += 1
-                continue
-            elif byte_value == 0x82:  # End of paragraph
-                finish_current_span()
-                current_text_bytes.extend(b"\n\n")
-                i += 1
-                continue
-            elif byte_value == 0x83:  # TAB
-                finish_current_span()
-                current_text_bytes.extend(b"\t")
-                i += 1
-                continue
-            elif byte_value == 0x89:  # End of hotspot
-                finish_current_span()
-                current_formatting["hyperlink"] = False
-                current_formatting["hyperlink_target"] = None
-                hotspot_active = False
-                i += 1
-                continue
-            elif byte_value == 0x8B:  # Non-break space
-                finish_current_span()
-                current_text_bytes.extend(b" ")
-                i += 1
-                continue
-            elif byte_value == 0x8C:  # Non-break hyphen
-                finish_current_span()
-                current_text_bytes.extend(b"-")
-                i += 1
-                continue
-
-            # Bitmap positioning commands (0x86-0x88)
-            elif byte_value in [0x86, 0x87, 0x88]:  # Embedded/bitmap positioning commands
-                finish_current_span()
-                alignment = {0x86: "inline", 0x87: "left", 0x88: "right"}[byte_value]
-
-                if i + 1 < len(raw_content):
-                    x1 = raw_content[i + 1]
-                    if x1 == 0x05:
-                        # Embedded window commands
-                        cmd_type = f"ew{alignment[0]}"  # ewc, ewl, ewr
-                        current_formatting["embedded_window"] = cmd_type
-                    else:
-                        # Bitmap commands
-                        cmd_type = f"bm{alignment[0]}"  # bmc, bml, bmr
-                        current_formatting["embedded_bitmap"] = cmd_type
-                    i += 2
-                else:
-                    i += 1
-                continue
-
-            # Embedded image commands (0xEE-0xEF range)
-            elif byte_value == 0xEE:  # Embedded bitmap command (bmc, bml, bmr)
-                finish_current_span()
-                if i + 1 < len(raw_content):
-                    image_type = raw_content[i + 1]
-                    if image_type == 0x01:  # bmc (bitmap centered)
-                        current_formatting["embedded_image"] = "bmc"
-                    elif image_type == 0x02:  # bml (bitmap left)
-                        current_formatting["embedded_image"] = "bml"
-                    elif image_type == 0x03:  # bmr (bitmap right)
-                        current_formatting["embedded_image"] = "bmr"
-
-                    # Extract bitmap reference (varies by type)
-                    if i + 5 < len(raw_content):
-                        bitmap_ref = struct.unpack("<L", raw_content[i + 2 : i + 6])[0]
-                        current_formatting["embedded_image"] = f"{current_formatting['embedded_image']}:{bitmap_ref}"
-                        i += 6
-                    else:
-                        i += 2
-                else:
-                    i += 1
-                continue
-            elif byte_value == 0xEF:  # End embedded image
-                finish_current_span()
-                current_formatting["embedded_image"] = None
-                i += 1
-                continue
-
-            # Basic formatting commands (legacy support)
-            elif byte_value == 0x01:  # Font change command
-                if i + 1 < len(raw_content):
-                    finish_current_span()
-                    current_font = raw_content[i + 1]
-                    i += 2
-                    continue
-            elif byte_value == 0x02:  # Line break
-                current_text_bytes.extend(b"\n")
-                i += 1
-                continue
-            elif byte_value == 0x03:  # Paragraph break
-                current_text_bytes.extend(b"\n\n")
-                i += 1
-                continue
-            elif byte_value == 0x04:  # Tab
-                current_text_bytes.extend(b"\t")
-                i += 1
-                continue
-            elif byte_value == 0x05:  # End of hotspot
-                finish_current_span()
-                current_formatting["hyperlink"] = False
-                current_formatting["hyperlink_target"] = None
-                hotspot_active = False
-                i += 1
-                continue
-
-            # Regular printable character or whitespace
-            elif byte_value >= 32 or byte_value in [0x0A, 0x0D, 0x09]:  # \n, \r, \t
-                current_text_bytes.append(byte_value)
-
-            i += 1
-
-        # Add final span
-        finish_current_span()
-        return text_spans, hotspot_mappings
 
     def _parse_table_content(
         self,
