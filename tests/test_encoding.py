@@ -68,3 +68,10 @@ def test_ansi_charset_does_not_override_lcid_code_page():
     assert system.encoding == "cp932"
     system._update_encoding_from_charset(204)
     assert system.encoding == "cp1251"
+
+
+def test_undecodable_byte_does_not_switch_code_page():
+    from winhlp.lib.text_utils import decode_help_text
+
+    # 0x81 is undefined in cp1252; the rest must still decode as cp1252.
+    assert decode_help_text(b"M\xeame \x81", "cp1252") == "Même �"

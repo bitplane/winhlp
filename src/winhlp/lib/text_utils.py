@@ -22,7 +22,7 @@ def decode_help_text(data: bytes, primary_encoding: Optional[str] = None) -> str
                          If None, uses cp1252 as primary
 
     Returns:
-        Decoded string, with fallback handling to prevent decode errors
+        Decoded string; undecodable bytes become U+FFFD
     """
     if not data:
         return ""
@@ -30,31 +30,12 @@ def decode_help_text(data: bytes, primary_encoding: Optional[str] = None) -> str
     # Primary encoding (from system file or default)
     primary = primary_encoding or "cp1252"
 
-    # Try primary encoding first
+    # Stay in the file's code page and replace only the undecodable bytes;
+    # switching code pages garbles the rest of the string.
     try:
-        return data.decode(primary)
-    except UnicodeDecodeError:
-        pass
-
-    # Fall back through common Windows encodings
-    # Order based on frequency in Windows Help files:
-    # - cp1252: Western European (most common)
-    # - cp1251: Cyrillic
-    # - cp850: DOS Latin-1 (used in older files)
-    # - utf-8: Unicode (newer files)
-    # - iso-8859-1: Latin-1 (backup)
-    fallback_encodings = ["cp1252", "cp1251", "cp850", "utf-8", "iso-8859-1"]
-
-    for encoding in fallback_encodings:
-        if encoding != primary:  # Don't retry the same encoding
-            try:
-                return data.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-
-    # Final fallback: decode with errors='replace' to avoid crashes
-    # This ensures we never fail to return a string, even for corrupted data
-    return data.decode("cp1252", errors="replace")
+        return data.decode(primary, errors="replace")
+    except LookupError:
+        return data.decode("cp1252", errors="replace")
 
 
 def decode_help_text_with_system(data: bytes, system_file=None) -> str:

@@ -91,8 +91,9 @@ def rtf_topics(rtf: bytes) -> list[bytes]:
 
 
 def words(text: str) -> list[str]:
-    # helpdeco writes bitmap references as literal {bmc name} text.
-    text = re.sub(r"\{(?:bm|ew)[clr]\w*\s[^}]*\}", " ", text)
+    # helpdeco writes pictures, embedded windows and macro buttons as literal
+    # authoring markup ({bmc name}, {ewl ...}, {button ...}), not visible text.
+    text = re.sub(r"\{(?:(?:bm|ew)[clr]\w*|button|mci\w*)\b[^}]*\}", " ", text)
     return text.replace("\xa0", " ").split()
 
 

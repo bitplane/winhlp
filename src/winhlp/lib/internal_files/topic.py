@@ -11,6 +11,7 @@ import warnings
 # command in a large corpus produces one warning per byte value, not thousands.
 _WARNED_TOPIC_COMMANDS: set = set()
 _WARNED_RECORD_TYPES: set = set()
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 
 def safe_unpack_from(format_str: str, data: bytes, offset: int, default_value=None):
@@ -951,7 +952,12 @@ class TopicFile(InternalFile):
             if before31:
                 if topic_pos + next_block >= len(self.raw_data):
                     break
-            elif next_block <= 0:
+            elif next_block == 0:
+                # TOPICPOS is unsigned in helpdeco, so only 0 stops the walk
+                # here; a final NextBlock of -1 is still emitted.
+                break
+            elif next_block < 0 and record_type == 0x02:
+                # HC31+ ends |TOPIC with an empty sentinel topic header.
                 break
             if data_len1 < 21 or block_size_ < data_len1:
                 break
@@ -978,6 +984,8 @@ class TopicFile(InternalFile):
             if before31:
                 topic_pos += next_block
             else:
+                if next_block < 0:
+                    break
                 self.topic_offset = self._next_topic_offset(self.topic_offset, next_block, topic_pos)
                 topic_pos = next_block
 
@@ -1362,6 +1370,10 @@ class TopicFile(InternalFile):
             if not current_text:
                 return
             text = self._decode_text(bytes(current_text))
+            if self._font_attributes(current_font).get("small_caps"):
+                # The compiler stores small-caps text uppercased; helpdeco
+                # restores the authored case with strlwr() (ASCII only).
+                text = text.translate(_ASCII_LOWER)
             span_index = len(text_spans)
 
             if hotspot_active and current_external_jump:
@@ -1647,7 +1659,6 @@ class TopicFile(InternalFile):
     def _decode_text(self, data: bytes) -> str:
         """
         Decode text data using the appropriate encoding from the system file.
-        Falls back through multiple encodings to handle international text.
         """
         if not data:
             return ""
@@ -1657,24 +1668,9 @@ class TopicFile(InternalFile):
         if self.system_file and self.system_file.encoding is not None:
             encoding = self.system_file.encoding
 
-        # Try the determined encoding first
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            pass
-
-        # Fall back through common Windows encodings
-        fallback_encodings = ["cp1252", "cp1251", "cp850", "iso-8859-1"]
-
-        for fallback_encoding in fallback_encodings:
-            if fallback_encoding != encoding:  # Don't retry the same encoding
-                try:
-                    return data.decode(fallback_encoding)
-                except UnicodeDecodeError:
-                    continue
-
-        # Final fallback: decode with errors='replace' to avoid crashes
-        return data.decode("cp1252", errors="replace")
+        # Stay in the file's code page: switching a whole segment to another
+        # code page because of one stray byte garbles it ("Même" -> "Mкme").
+        return data.decode(encoding, errors="replace")
 
     def _start_new_topic(self, topic_header, title=None, entry_macros=None):
         """Start parsing a new topic."""
