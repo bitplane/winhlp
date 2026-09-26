@@ -60,6 +60,8 @@ def _shg_runlen(data: bytes) -> bytes:
     while i < n:
         c = data[i]
         i += 1
+        if not c & 0x7F:
+            continue  # empty run: the next byte is a new count (helpdec1.c DeRun)
         if c & 0x80:
             count = c & 0x7F
             out += data[i : i + count]
@@ -81,12 +83,38 @@ def _unpack(method: int, data: bytes) -> bytes:
 
 
 def _build_bmp(width, height, planes, bit_count, n_colors, palette, pixels) -> bytes:
+    # Some pictures decompress a few bytes short; pad so the BMP stays readable.
+    expected = ((width * bit_count + 31) // 32) * 4 * height
+    if len(pixels) < expected:
+        pixels = pixels.ljust(expected, b"\x00")
     header_size = 14 + 40 + len(palette)
     file_header = struct.pack("<2sIHHI", b"BM", header_size + len(pixels), 0, 0, header_size)
     info_header = struct.pack(
         "<IiiHHIIiiII", 40, width, height, planes or 1, bit_count, 0, len(pixels), 0, 0, n_colors, 0
     )
     return file_header + info_header + palette + pixels
+
+
+def _ddb_to_dib(width, height, bit_count, n_colors, pixels) -> Tuple[bytes, bytes]:
+    """Convert DDB scanlines (WORD-aligned, no palette) to DIB layout.
+
+    helpdeco.c writes a black/white palette and re-pads each row to a DWORD
+    boundary. DDBs in help files are monochrome; deeper ones get a grey ramp.
+    DDB rows run top-down but a DIB is bottom-up, so the row order is reversed
+    (helpdeco copies them unflipped, which yields upside-down images).
+    """
+    if n_colors == 2:
+        palette = struct.pack("<II", 0x000000, 0xFFFFFF)
+    else:
+        steps = max(n_colors - 1, 1)
+        palette = b"".join(bytes((v, v, v, 0)) for v in (i * 255 // steps for i in range(n_colors)))
+    src_stride = ((width * bit_count + 15) // 16) * 2
+    dst_stride = ((width * bit_count + 31) // 32) * 4
+    rows = bytearray()
+    for row in reversed(range(height)):
+        line = pixels[row * src_stride : (row + 1) * src_stride]
+        rows += line.ljust(dst_stride, b"\x00")[:dst_stride]
+    return palette, bytes(rows)
 
 
 def _decode_one(raw: bytes, off: int) -> Optional[DecodedPicture]:
@@ -124,6 +152,8 @@ def _decode_one(raw: bytes, off: int) -> Optional[DecodedPicture]:
         pixels = _unpack(packing, comp)
         if width <= 0 or height <= 0 or width > 20000 or height > 20000:
             return None
+        if picture_type == 5:
+            palette, pixels = _ddb_to_dib(width, height, bit_count, n_colors, pixels)
         hotspot_data = raw[off + hotspot_offset : off + hotspot_offset + hotspot_size] if hotspot_offset else b""
         return DecodedPicture(
             "bmp",
