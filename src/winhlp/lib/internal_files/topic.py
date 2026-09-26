@@ -534,7 +534,16 @@ class ParsedTopic(BaseModel):
     raw_data: dict
 
     def get_plain_text(self) -> str:
-        """Extract plain text content without formatting."""
+        """Extract plain text content without formatting, in reading order."""
+        if self.content_blocks:
+            parts = []
+            for block in self.content_blocks:
+                if block.kind == "table":
+                    parts.append("\n" + block.table.get_plain_text() + "\n")
+                else:
+                    parts.append("".join(span.text for span in block.text_spans))
+            return "".join(parts)
+
         text_parts = []
 
         # Add text spans
@@ -1037,18 +1046,9 @@ class TopicFile(InternalFile):
                 source_record_offset=record_offset,
             )
         elif link.record_type == 0x23:  # TL_TABLE
-            paragraph_info = self._parse_paragraph_info(link_data1)
             source_offset = self.topic_offset
-            table = self._parse_table_content(
-                link_data2,
-                link.data_len2,
-                link.block_size,
-                link.data_len1,
-                paragraph_info,
-                paragraph_info.raw_data["raw"] + self.remaining_linkdata1,
-            )
+            table = self._parse_table_record(link, link_data1, link_data2)
             if table:
-                self.topic_offset += max(0, table.raw_data.get("topic_offset_increment", 0))
                 self._add_table_to_current_topic(table, source_offset, self.topic_offset, record_offset)
         else:
             # Unknown record type. _parse_links only dispatches 0x01/0x02/0x20/0x23
@@ -1176,6 +1176,23 @@ class TopicFile(InternalFile):
         if has_topic_length:
             topic_length, offset = self.scan_word(data, offset)
 
+        fields, offset = self._parse_paragraph_attributes(data, offset)
+        parsed_paragraph_info = {"topic_size": topic_size, "topic_length": topic_length, **fields}
+
+        paragraph_info = ParagraphInfo(
+            **parsed_paragraph_info, raw_data={"raw": data[start_offset:offset], "parsed": parsed_paragraph_info}
+        )
+
+        # Now parse the formatting commands that follow ParagraphInfo
+        self.formatting_commands.append(paragraph_info)
+
+        # Store the remaining LinkData1 after ParagraphInfo for interleaved parsing
+        self.remaining_linkdata1 = data[offset:] if offset < len(data) else b""
+
+        return paragraph_info
+
+    def _parse_paragraph_attributes(self, data: bytes, offset: int) -> tuple[dict, int]:
+        """Parse the paragraph attributes shared by display records and table columns."""
         # Four raw bytes precede the attribute bits (helpdeco.c `ptr += 4`):
         #   unsigned char unknownUnsignedChar
         #   char          unknownBiasedChar
@@ -1271,9 +1288,7 @@ class TopicFile(InternalFile):
                     tabs.append(Tab(position=tab_stop & 0x3FFF, tab_type=tab_type))
                 tab_info = TabInfo(number_of_tab_stops=len(tabs), tabs=tabs)
 
-        parsed_paragraph_info = {
-            "topic_size": topic_size,
-            "topic_length": topic_length,
+        return {
             "bits": bits,
             "unknown": unknown,
             "spacing_above": spacing_above,
@@ -1284,22 +1299,19 @@ class TopicFile(InternalFile):
             "firstline_indent": firstline_indent,
             "border_info": border_info,
             "tab_info": tab_info,
-        }
-
-        paragraph_info = ParagraphInfo(
-            **parsed_paragraph_info, raw_data={"raw": data[start_offset:offset], "parsed": parsed_paragraph_info}
-        )
-
-        # Now parse the formatting commands that follow ParagraphInfo
-        self.formatting_commands.append(paragraph_info)
-
-        # Store the remaining LinkData1 after ParagraphInfo for interleaved parsing
-        self.remaining_linkdata1 = data[offset:] if offset < len(data) else b""
-
-        return paragraph_info
+        }, offset
 
     def _parse_topic_content_interleaved(
-        self, linkdata1: bytes, linkdata2: bytes, data_len2: int, block_size: int, data_len1: int
+        self,
+        linkdata1: bytes,
+        linkdata2: bytes,
+        data_len2: int,
+        block_size: int,
+        data_len1: int,
+        raw_text: Optional[bytes] = None,
+        start_p2: int = 0,
+        initial_font: Optional[int] = None,
+        table_mode: bool = False,
     ) -> tuple[List[TextSpan], List[HotspotMapping]]:
         """
         Parse topic content by interleaving LinkData1 (formatting commands) with
@@ -1317,15 +1329,17 @@ class TopicFile(InternalFile):
         text_spans: List[TextSpan] = []
         hotspot_mappings: List[HotspotMapping] = []
 
-        raw_linkdata2 = self._parse_link_data2(linkdata2, data_len2, block_size, data_len1)
+        if raw_text is None:
+            raw_text = self._parse_link_data2(linkdata2, data_len2, block_size, data_len1)
+        raw_linkdata2 = raw_text
 
         n1 = len(linkdata1)
         n2 = len(raw_linkdata2)
         p1 = 0  # pointer into linkdata1 (formatting commands)
-        p2 = 0  # pointer into raw_linkdata2 (text)
+        p2 = start_p2  # pointer into raw_linkdata2 (text)
 
         current_text = bytearray()
-        current_font: Optional[int] = None
+        current_font: Optional[int] = initial_font
         fmt = {
             "bold": False,
             "italic": False,
@@ -1481,7 +1495,10 @@ class TopicFile(InternalFile):
                 current_text.extend(b"\n")
                 p1 += 1
             elif command == 0x82:  # end of paragraph
-                current_text.extend(b"\n\n")
+                # In a table, 0x82 followed by 0xFF ends the cell paragraph; the
+                # caller decides between next paragraph, next cell or end of row.
+                if not (table_mode and p1 + 1 < n1 and linkdata1[p1 + 1] == 0xFF):
+                    current_text.extend(b"\n\n")
                 p1 += 1
             elif command == 0x83:  # tab
                 current_text.extend(b"\t")
@@ -1610,6 +1627,7 @@ class TopicFile(InternalFile):
         # Emit any text left in the buffer once the command stream ends.
         flush_span()
 
+        self._interleave_state = (p1, p2, current_font)
         return text_spans, hotspot_mappings
 
     def _font_attributes(self, font_index: Optional[int]) -> dict:
@@ -1722,272 +1740,79 @@ class TopicFile(InternalFile):
             if not current_topic.paragraph_info:
                 current_topic.paragraph_info = paragraph_info
 
-    def _parse_table_content(
-        self,
-        data: bytes,
-        data_len2: int,
-        block_size: int,
-        data_len1: int,
-        paragraph_info: Optional[ParagraphInfo],
-        table_link_data1: Optional[bytes] = None,
-    ) -> Optional[Table]:
-        """Parse table content from RecordType 0x23 data.
+    def _parse_table_record(self, link: TopicLink, data: bytes, link_data2: bytes) -> Optional[Table]:
+        """Parse one TL_TABLE record (a table row), following helpdeco.c TopicDump.
 
-        Based on helldeco.c table parsing logic following TL_TABLE record type exactly.
-        Tables in WinHelp have complex structure with column definitions and cell formatting.
+        After the column layout, LinkData1 repeats [column number, unknown word,
+        byte, paragraph attributes, formatting commands up to 0xFF] until the
+        column number is -1. The text pointer runs on across columns; a repeated
+        column number continues the same cell with a new paragraph.
         """
-        if not paragraph_info or len(paragraph_info.raw_data["raw"]) < 8:
+        topic_size, offset = self.scan_long(data, 0)
+        topic_length, offset = self.scan_word(data, offset)
+        self.topic_offset += topic_length
+        if offset + 2 > len(data):
             return None
-
-        # Parse LinkData1 to get table structure from helldeco.c
-        link_data1 = table_link_data1 or paragraph_info.raw_data["raw"]
-        offset = 0
-
-        # Skip the expanded size (already parsed in paragraph_info)
-        expanded_size, offset = self.scan_long(link_data1, offset)
-
-        # Parse topic offset increment for Win 3.1+ (from helldeco.c)
-        topic_offset_increment, offset = self.scan_word(link_data1, offset)
-
-        # Parse table structure following helldeco.c TL_TABLE logic
-        if offset >= len(link_data1):
-            return None
-
-        cols = link_data1[offset]  # Number of columns
-        offset += 1
-
-        if offset >= len(link_data1):
-            return None
-
-        table_type = link_data1[offset]  # Table type (0-3)
-        offset += 1
-
-        # Parse minimum width based on table type (from helldeco.c)
+        cols, table_type = data[offset], data[offset + 1]
+        offset += 2
         min_width = None
-        if table_type in [0, 2]:
-            if offset + 1 < len(link_data1):
-                min_width = struct.unpack_from("<h", link_data1, offset)[0]
-                offset += 2
-        elif table_type in [1, 3]:
-            min_width = 32767  # Max width for auto-sizing tables
+        if table_type in (0, 2) and offset + 2 <= len(data):
+            min_width = struct.unpack_from("<h", data, offset)[0]
+            offset += 2
+        column_widths, column_gaps = [], []
+        for _ in range(cols):
+            if offset + 4 > len(data):
+                return None
+            width, gap = struct.unpack_from("<hh", data, offset)
+            column_widths.append(width)
+            column_gaps.append(gap)
+            offset += 4
 
-        # Parse column widths and gaps (from helldeco.c)
-        column_widths = []
-        column_gaps = []
-        for col in range(cols):
-            if offset + 3 < len(link_data1):
-                width = struct.unpack_from("<h", link_data1, offset)[0]
-                gap = struct.unpack_from("<h", link_data1, offset + 2)[0]
-                column_widths.append(width)
-                column_gaps.append(gap)
-                offset += 4
-            else:
+        raw_text = self._parse_link_data2(link_data2, link.data_len2, link.block_size, link.data_len1)
+        cells: List[TableCell] = []
+        last_col = None
+        text_pos = 0
+        font = None
+        while offset + 2 <= len(data):
+            column = struct.unpack_from("<h", data, offset)[0]
+            if column == -1 or offset + 5 > len(data):
                 break
-
-        # Parse table content using the correct algorithm from helldeco.c
-        table_text = self._parse_link_data2(data, data_len2, block_size, data_len1)
-        if not table_text:
-            return None
-
-        # Parse table content following helldeco.c column loop structure
-        rows = []
-
-        # Parse LinkData1 column headers following helldeco.c logic
-        # for (col = 0; (TopicLink.RecordType == TL_TABLE ? *(int16_t*)ptr != -1 : col == 0) && ptr < LinkData1 + TopicLink.DataLen1 - sizeof(TOPICLINK); col++)
-        link_data1_ptr = offset
-        col = 0
-        column_formats = []
-
-        while link_data1_ptr < len(link_data1) - 21:  # sizeof(TOPICLINK) = 21
-            # Check termination condition for TL_TABLE
-            if link_data1_ptr + 1 < len(link_data1):
-                terminator = struct.unpack_from("<h", link_data1, link_data1_ptr)[0]
-                if terminator == -1:
-                    break
-
-            # Parse column header following helldeco.c structure
-            if link_data1_ptr + 4 < len(link_data1):
-                column_number = struct.unpack_from("<h", link_data1, link_data1_ptr)[0]
-                formatting_flags = struct.unpack_from("<H", link_data1, link_data1_ptr + 2)[0]
-                cell_id = struct.unpack_from("<B", link_data1, link_data1_ptr + 4)[0] - 0x80
-                link_data1_ptr += 5
+            fields, offset = self._parse_paragraph_attributes(data, offset + 5)
+            paragraph_info = ParagraphInfo(
+                topic_size=topic_size, topic_length=topic_length, **fields, raw_data={"column": column}
+            )
+            spans, _ = self._parse_topic_content_interleaved(
+                data[offset:], b"", 0, 0, 0, raw_text=raw_text, start_p2=text_pos, initial_font=font, table_mode=True
+            )
+            consumed, text_pos, font = self._interleave_state
+            offset += consumed
+            bits = fields["bits"]
+            alignment = (
+                "center" if bits.center_aligned_paragraph else "right" if bits.right_aligned_paragraph else "left"
+            )
+            if column == last_col and cells:
+                cells[-1].text_spans.extend([TextSpan(text="\n\n", raw_data={"type": "text"}), *spans])
             else:
-                break
-
-            # Skip paragraph formatting data (from helldeco.c)
-            if link_data1_ptr + 3 < len(link_data1):
-                link_data1_ptr += 4  # Skip 4 bytes
-
-            # Parse paragraph bits following helldeco.c logic
-            if link_data1_ptr + 1 < len(link_data1):
-                para_bits = struct.unpack_from("<H", link_data1, link_data1_ptr)[0]
-                link_data1_ptr += 2
-                cell_border = None
-
-                # Parse conditional fields based on paragraph bits (from helldeco.c)
-                if para_bits & 0x0001:  # unknown bit
-                    unknown_val, link_data1_ptr = self.scan_long(link_data1, link_data1_ptr)
-                if para_bits & 0x0002:  # top spacing
-                    top_spacing, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
-                if para_bits & 0x0004:  # bottom spacing
-                    bottom_spacing, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
-                if para_bits & 0x0008:  # line spacing
-                    line_spacing, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
-                if para_bits & 0x0010:  # left indent
-                    left_indent, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
-                if para_bits & 0x0020:  # right indent
-                    right_indent, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
-                if para_bits & 0x0040:  # first line indent
-                    first_line_indent, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
-                if para_bits & 0x0100:  # border info
-                    if link_data1_ptr < len(link_data1):
-                        border_bits = link_data1[link_data1_ptr]
-                        link_data1_ptr += 1
-                        border_width, link_data1_ptr = self.scan_int(link_data1, link_data1_ptr)
-                        cell_border = BorderInfo(
-                            border_box=bool(border_bits & 0x01),
-                            border_top=bool(border_bits & 0x02),
-                            border_left=bool(border_bits & 0x04),
-                            border_bottom=bool(border_bits & 0x08),
-                            border_right=bool(border_bits & 0x10),
-                            border_thick=bool(border_bits & 0x20),
-                            border_double=bool(border_bits & 0x40),
-                            border_unknown=bool(border_bits & 0x80),
-                            border_width=border_width,
-                        )
-                if para_bits & 0x0200:  # tab info
-                    tab_count, link_data1_ptr = self.scan_word(link_data1, link_data1_ptr)
-                    for _ in range(tab_count):
-                        if link_data1_ptr >= len(link_data1):
-                            break
-                        tab_pos, link_data1_ptr = self.scan_word(link_data1, link_data1_ptr)
-                        if tab_pos & 0x4000:
-                            if link_data1_ptr < len(link_data1):
-                                tab_type, link_data1_ptr = self.scan_word(link_data1, link_data1_ptr)
-
-                column_formats.append(
-                    {
-                        "column_number": column_number,
-                        "formatting_flags": formatting_flags,
-                        "cell_id": cell_id,
-                        "alignment": "center" if para_bits & 0x0800 else "right" if para_bits & 0x0400 else "left",
-                        "border_info": cell_border,
-                    }
-                )
-
-            col += 1
-
-        # Parse actual table cell content from LinkData2
-        # This is the decompressed text content that contains the actual table data
-        if table_text:
-            # Parse table cells using proper TL_TABLE cell delimiters from helldeco.c
-            # Tables use 0x82 commands with special formatting for cells
-            rows = self._parse_table_cells_from_text(table_text, cols, column_widths)
-            for row in rows:
-                for index, cell in enumerate(row.cells):
-                    if index < len(column_formats):
-                        cell_format = column_formats[index]
-                        row.cells[index] = cell.model_copy(update=cell_format)
-
-        if not rows:
-            return None
-
-        # Create table structure with proper metadata
-        table = Table(
-            rows=rows,
-            column_count=cols,
-            column_widths=column_widths,
-            table_formatting=paragraph_info,
-            raw_data={
-                "row_count": len(rows),
-                "column_count": cols,
-                "table_type": table_type,
-                "min_width": min_width,
-                "column_gaps": column_gaps,
-                "expanded_size": expanded_size,
-                "topic_offset_increment": topic_offset_increment,
-                "column_formats": column_formats,
-            },
-        )
-
-        return table
-
-    def _parse_table_cells_from_text(self, table_text, expected_cols: int, column_widths: List[int]) -> List[TableRow]:
-        """Parse table cell content following helldeco.c's TL_TABLE cell logic.
-
-        table_text is the raw (phrase-decompressed) LinkData2 bytes. Cells are
-        delimited by 0x82 records whose following int16 column indicator selects
-        end-of-row (-1), same-column continuation (== lastcol), or next cell.
-        (helldeco.c case 0x82 for TL_TABLE.)
-        """
-        data = table_text if isinstance(table_text, (bytes, bytearray)) else bytes(table_text, "latin-1", "replace")
-
-        rows: List[TableRow] = []
-        current_row_cells: List[TableCell] = []
-        cell_bytes = bytearray()
-        last_col = -1
-
-        def flush_cell():
-            nonlocal cell_bytes
-            if bytes(cell_bytes).strip():
-                text = self._decode_text(bytes(cell_bytes))
-                current_row_cells.append(
+                cells.append(
                     TableCell(
-                        text_spans=self._parse_text_content_for_cell(text),
-                        alignment="left",
-                        raw_data={"text": text},
+                        text_spans=spans,
+                        alignment=alignment,
+                        column_number=column,
+                        paragraph_info=paragraph_info,
+                        border_info=fields["border_info"],
+                        raw_data={},
                     )
                 )
-            cell_bytes = bytearray()
+            last_col = column
 
-        def flush_row():
-            if current_row_cells:
-                rows.append(TableRow(cells=list(current_row_cells), raw_data={"cell_count": len(current_row_cells)}))
-                current_row_cells.clear()
-
-        i = 0
-        n = len(data)
-        while i < n:
-            b = data[i]
-            if b == 0x82:  # paragraph break / cell delimiter
-                if i + 2 < n:
-                    next_byte = data[i + 1]
-                    if next_byte != 0xFF and i + 4 <= n:
-                        col_indicator = struct.unpack_from("<h", data, i + 2)[0]
-                        if col_indicator == -1:  # end of row
-                            flush_cell()
-                            flush_row()
-                            last_col = -1
-                        elif col_indicator == last_col:  # same column continued
-                            cell_bytes += b"\n"
-                        else:  # move to next cell
-                            flush_cell()
-                            last_col = col_indicator
-                        i += 4
-                        continue
-                    else:  # regular paragraph break within a cell
-                        cell_bytes += b"\n"
-                        i += 1
-                        continue
-                else:
-                    i += 1
-                    continue
-            elif b >= 32 or b in (0x0A, 0x0D, 0x09):  # printable or whitespace
-                cell_bytes.append(b)
-            i += 1
-
-        flush_cell()
-        flush_row()
-        return rows
-
-    def _parse_text_content_for_cell(self, cell_text: str) -> List[TextSpan]:
-        """Parse text content for a table cell, handling basic formatting."""
-        if not cell_text:
-            return []
-
-        # Simple implementation - treat cell content as plain text for now
-        # Could be enhanced to handle formatting commands within cells
-        return [TextSpan(text=cell_text, raw_data={"type": "cell_text"})]
+        if not cells:
+            return None
+        return Table(
+            rows=[TableRow(cells=cells, raw_data={"cell_count": len(cells)})],
+            column_count=cols,
+            column_widths=column_widths,
+            raw_data={"table_type": table_type, "min_width": min_width, "column_gaps": column_gaps},
+        )
 
     def _add_table_to_current_topic(
         self,
@@ -2002,6 +1827,17 @@ class TopicFile(InternalFile):
             self._start_new_topic(None)
 
         current_topic = self.parsed_topics[-1]
+        # Each TL_TABLE record is one row; consecutive rows with the same column
+        # layout belong to one table.
+        last = current_topic.content_blocks[-1] if current_topic.content_blocks else None
+        if (
+            isinstance(last, TopicTableBlock)
+            and last.table.column_count == table.column_count
+            and last.table.column_widths == table.column_widths
+        ):
+            last.table.rows.extend(table.rows)
+            last.source_end_offset = source_end_offset
+            return
         current_topic.tables.append(table)
         current_topic.content_blocks.append(
             TopicTableBlock(

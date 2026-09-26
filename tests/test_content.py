@@ -227,3 +227,14 @@ def test_win30_topic_offsets_are_header_topicpos():
     hlp = HelpFile(filepath=os.path.join(DATA, "FXSEARCH.HLP"))
     offsets = {t.topic_offset for t in hlp.topic.get_all_topics()}
     assert all(entry.topic_offset in offsets for entry in hlp.ctxomap.entries)
+
+
+def test_table_rows_follow_command_stream_cells():
+    # Each TL_TABLE record is a row; cells come from the column loop in
+    # LinkData1, and consecutive rows with the same layout form one table.
+    topics = _topics_text("win95/WINDOWS.HLP")[0]
+    table = next(t for topic in topics for t in topic.tables)
+    assert len(table.rows) == 16
+    cells = [cell.get_plain_text().strip() for cell in table.rows[0].cells]
+    assert cells[0] == "Enter"
+    assert cells[1].startswith("To specify")

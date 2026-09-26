@@ -67,9 +67,9 @@ def rtf_topics(rtf: bytes) -> list[bytes]:
             elif name == "page":
                 topics.append(bytearray())
             elif not (skip or hidden):
-                if name in ("par", "line"):
+                if name in ("par", "line", "row"):
                     out += b"\n"
-                elif name == "tab":
+                elif name in ("tab", "cell"):
                     out += b"\t"
             continue
         if symbol == b"*":
@@ -116,15 +116,18 @@ def compare_file(path: str, binary: str, timeout: int) -> dict:
         local = Path(work) / Path(path).name
         os.symlink(os.path.abspath(path), local)
         try:
-            subprocess.run(
+            # helpdeco pauses on each non-fatal error until it reads a CR.
+            run = subprocess.run(
                 [binary, local.name, "-r", "-y"],
                 cwd=work,
+                input=b"\r" * 10_000,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired:
             return {**result, "status": "helpdeco-timeout"}
+        result["helpdeco_errors"] = run.stderr.count(b"Press CR to continue")
         rtf_path = local.with_suffix(".rtf")
         if not rtf_path.exists():
             return {**result, "status": "helpdeco-error"}
@@ -132,6 +135,8 @@ def compare_file(path: str, binary: str, timeout: int) -> dict:
 
     a = words(" ".join(theirs))
     b = words(" ".join(ours))
+    if not a and b:
+        return {**result, "status": "helpdeco-empty"}
     matcher = difflib.SequenceMatcher(None, a, b, autojunk=len(a) + len(b) > 200_000)
     diffs = [
         {"op": op, "helpdeco": " ".join(a[i1:i2])[:200], "winhlp": " ".join(b[j1:j2])[:200]}

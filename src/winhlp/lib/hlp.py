@@ -29,6 +29,7 @@ from .internal_files.chartab import ChartabFile
 from .internal_files.gid import WinPosFile, PeteFile, FlagsFile, CntJumpFile, CntTextFile
 from .exceptions import InvalidHLPFileError
 import os
+import re
 import struct
 
 
@@ -43,6 +44,10 @@ class HLPHeader(BaseModel):
     free_chain_start: int = Field(..., description="Offset of the first free block, or -1")
     entire_file_size: int = Field(..., description="Size of the entire help file in bytes")
     raw_data: dict
+
+
+# Shift-JIS punctuation, hiragana and katakana double-byte characters.
+_SHIFT_JIS_KANA = re.compile(rb"\x81[\x40-\x5b]|\x82[\x9f-\xf1]|\x83[\x40-\x96]")
 
 
 class HelpFile(BaseModel):
@@ -202,6 +207,7 @@ class HelpFile(BaseModel):
         self.header = self._parse_header()
         self.directory = self._parse_directory()
         self.system = self._parse_system()
+        self._guess_undeclared_code_page()
         self.font = self._parse_font()
 
         # Phrase tables must be parsed BEFORE |TOPIC: LinkData2 in topic records
@@ -630,6 +636,25 @@ class HelpFile(BaseModel):
         Parses the |TopicId internal file.
         """
         return self._load_internal_file("|TopicId", TopicIdFile)
+
+    def _guess_undeclared_code_page(self):
+        """Pick cp932 for Japanese files that declare no LCID or specific charset.
+
+        Only the uncompressed |TTLBTREE titles are sampled: Shift-JIS kana
+        (lead bytes 0x81-0x83) are dense there in Japanese files and absent in
+        cp1252 ones, whereas compressed |TOPIC bytes match by chance.
+        """
+        system = self.system
+        if system is None or system.lcid or getattr(system, "charset", None) not in (None, 0, 1):
+            return
+        titles = self._parse_ttlbtree()
+        if not titles:
+            return
+        sample = b"".join(entry.raw_data["raw"][4:] for entry in titles.entries if entry.raw_data.get("raw"))
+        high = sum(byte >= 0x80 for byte in sample)
+        kana = len(_SHIFT_JIS_KANA.findall(sample))
+        if kana >= 3 and kana >= high // 4:
+            system.encoding = "cp932"
 
     def _parse_ttlbtree(self) -> TTLBTreeFile:
         """
