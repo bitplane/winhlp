@@ -81,7 +81,7 @@ def lz77_decompress(data: bytes) -> bytes:
     return bytes(output)
 
 
-def phrase_decompress(data: bytes, phrases: List[str], encoding: str = "cp1252") -> bytes:
+def phrase_decompress(data: bytes, phrases: List[str | bytes], encoding: str = "cp1252") -> bytes:
     """
     Decompresses phrase-compressed data.
 
@@ -120,7 +120,7 @@ def phrase_decompress(data: bytes, phrases: List[str], encoding: str = "cp1252")
             # Emit the phrase if it exists
             if 0 <= phrase_num < len(phrases):
                 phrase = phrases[phrase_num]
-                output.extend(phrase.encode(encoding, errors="replace"))
+                output.extend(phrase if isinstance(phrase, bytes) else phrase.encode(encoding, errors="replace"))
                 if add_space:
                     output.append(ord(" "))
 

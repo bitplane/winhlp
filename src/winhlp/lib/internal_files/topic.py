@@ -3,6 +3,7 @@
 from .base import InternalFile
 from pydantic import BaseModel
 from typing import List, Any, Literal, Optional, Tuple, Union
+import codecs
 import struct
 from ..compression import decompress
 import warnings
@@ -1161,7 +1162,7 @@ class TopicFile(InternalFile):
             if "|Phrases" in hlp_file.directory.files:
                 from ..compression import phrase_decompress
 
-                phrases = hlp_file.phrase.phrases if hlp_file.phrase else []
+                phrases = hlp_file.phrase.phrase_bytes if hlp_file.phrase else []
                 return phrase_decompress(data, phrases, self.system_file.encoding)
 
         # Fallback: no phrase compression - data is stored uncompressed
@@ -1348,6 +1349,8 @@ class TopicFile(InternalFile):
 
         current_text = bytearray()
         current_font: Optional[int] = initial_font
+        encoding = getattr(self.system_file, "encoding", None) or "cp1252"
+        decoder = codecs.getincrementaldecoder(encoding)(errors="replace")
         fmt = {
             "bold": False,
             "italic": False,
@@ -1369,7 +1372,12 @@ class TopicFile(InternalFile):
             nonlocal total_text_position, hotspot_active, current_external_jump
             if not current_text:
                 return
-            text = self._decode_text(bytes(current_text))
+            # Incremental, so a double-byte character split by a formatting
+            # command is completed from the next segment.
+            text = decoder.decode(bytes(current_text))
+            if not text:
+                current_text.clear()
+                return
             if self._font_attributes(current_font).get("small_caps"):
                 # The compiler stores small-caps text uppercased; helpdeco
                 # restores the authored case with strlwr() (ASCII only).
@@ -1636,8 +1644,12 @@ class TopicFile(InternalFile):
                     warnings.warn(f"Unknown topic formatting command 0x{command:02X}; skipping one byte")
                 p1 += 1
 
-        # Emit any text left in the buffer once the command stream ends.
+        # Emit any text left in the buffer once the command stream ends,
+        # including a dangling lead byte.
         flush_span()
+        tail = decoder.decode(b"", final=True)
+        if tail and text_spans:
+            text_spans[-1].text += tail
 
         self._interleave_state = (p1, p2, current_font)
         return text_spans, hotspot_mappings

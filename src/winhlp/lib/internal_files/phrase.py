@@ -21,6 +21,7 @@ class PhraseFile(InternalFile):
 
     phrase_count: int = 0
     phrases: List[str] = []
+    phrase_bytes: List[bytes] = []
     is_new_format: bool = False  # VC4.0 MSDEV format
     system_file: Any = None
 
@@ -28,6 +29,7 @@ class PhraseFile(InternalFile):
         super().__init__(**data)
         self.system_file = system_file
         self.phrases = []  # Initialize as instance variable
+        self.phrase_bytes = []  # raw phrases, for byte-exact decompression
         self._parse()
 
     def _parse(self):
@@ -125,8 +127,10 @@ class PhraseFile(InternalFile):
                 # Decode using appropriate encoding from system file
                 phrase = decode_help_text_with_system(phrase_bytes, self.system_file)
                 self.phrases.append(phrase)
+                self.phrase_bytes.append(phrase_bytes)
             else:
                 self.phrases.append("")  # Invalid phrase
+                self.phrase_bytes.append(b"")
 
     def get_phrase(self, phrase_number: int) -> Optional[str]:
         """
