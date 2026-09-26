@@ -743,6 +743,45 @@ class ParsedTopic(BaseModel):
         return "".join(rtf_parts)
 
 
+class _TopicReader:
+    """Read |TOPIC by TOPICPOS across block boundaries (helpdeco.c TopicRead)."""
+
+    def __init__(self, raw: bytes, block_size: int, decompress_size: int, lz_compressed: bool):
+        self.raw = raw
+        self.block_size = block_size
+        self.decompress_size = decompress_size
+        self.lz_compressed = lz_compressed
+        self.position = 12
+        self._cache: dict = {}
+
+    def _block(self, number: int) -> Optional[bytes]:
+        if number not in self._cache:
+            start = number * self.block_size
+            if number < 0 or start >= len(self.raw):
+                return None
+            data = self.raw[start + 12 : start + self.block_size]
+            if self.lz_compressed:
+                data = decompress(method=2, data=data)[: self.decompress_size]
+            self._cache = {number: data}  # helpdeco keeps one block buffer too
+        return self._cache[number]
+
+    def read(self, position: int, count: int) -> bytes:
+        out = bytearray()
+        while count > 0:
+            number, offset = divmod(position - 12, self.decompress_size)
+            data = self._block(number)
+            if data is None:
+                break
+            chunk = data[offset : offset + count]
+            out += chunk
+            count -= len(chunk)
+            position += len(chunk)
+            if count > 0:
+                position = (number + 1) * self.decompress_size + 12
+        self.position = position
+        return bytes(out)
+
+
 class TopicFile(InternalFile):
     """
     Parses the |TOPIC file, which holds the actual help content,
@@ -868,216 +907,70 @@ class TopicFile(InternalFile):
 
     def _parse_blocks(self):
         """
-        Parses the topic blocks.
+        Walk the TOPICLINK chain through |TOPIC, following helpdeco.c TopicDump.
 
-        This logic is based on the `DecompressIntoBuffer` function in `helpdec1.c`,
-        which handles LZ77 decompression and variable block sizes.
+        Links are read through a virtual TOPICPOS stream (``_TopicReader``, a port
+        of helpdeco's TopicRead) so a link, or its LinkData, may span any number
+        of topic blocks. HC30 NextBlock is relative to the current TOPICPOS;
+        HC31+ NextBlock is the absolute TOPICPOS of the next link.
         """
+        header = self.system_file.header if self.system_file else None
+        before31 = bool(header and header.minor < 16)
+        lz_compressed = bool(header and not before31 and header.flags in (4, 8))
+        if before31:
+            block_size = decompress_size = 2048
+        else:
+            block_size = 2048 if header and header.flags == 8 else 4096
+            decompress_size = 0x4000
+
+        for start in range(0, len(self.raw_data) - 11, block_size):
+            raw = self.raw_data[start : start + 12]
+            last_link, first_link, last_header = struct.unpack("<lll", raw)
+            parsed = {"last_topic_link": last_link, "first_topic_link": first_link, "last_topic_header": last_header}
+            self.blocks.append(TopicBlockHeader(**parsed, raw_data={"raw": raw, "parsed": parsed}))
+
+        reader = _TopicReader(self.raw_data, block_size, decompress_size, lz_compressed)
         self.topic_offset = 0
-        offset = 0
-        block_index = 0
-
-        while offset < len(self.raw_data):
-            # TOPICOFFSET = block_index * 0x8000 + (chars counted from the first
-            # TOPICLINK of this block). Reset the per-block character base here;
-            # display records advance self.topic_offset by their char count.
-            self.topic_offset = block_index * 0x8000
-
-            raw_header_bytes = self.raw_data[offset : offset + 12]
-            if len(raw_header_bytes) < 12:
+        topic_pos = 12
+        seen = set()
+        while topic_pos not in seen:
+            seen.add(topic_pos)
+            raw_link = reader.read(topic_pos, 21)
+            if len(raw_link) < 21:
                 break
-
-            last_topic_link, first_topic_link, last_topic_header = struct.unpack("<lll", raw_header_bytes)
-
-            parsed_header = {
-                "last_topic_link": last_topic_link,
-                "first_topic_link": first_topic_link,
-                "last_topic_header": last_topic_header,
-            }
-
-            block = TopicBlockHeader(**parsed_header, raw_data={"raw": raw_header_bytes, "parsed": parsed_header})
-            self.blocks.append(block)
-
-            # Determine compression and version flags (from helldeco.c)
-            # before31 = SysHdr.Minor < 16
-            # lzcompressed = !before31 && (SysHdr.Flags == 4 || SysHdr.Flags == 8)
-            before31 = self.system_file and self.system_file.header.minor < 16
-            is_lz_compressed = False
-            if not before31 and self.system_file:
-                if self.system_file.header.flags == 4 or self.system_file.header.flags == 8:
-                    is_lz_compressed = True
-
-            # Determine block size based on help file version (from helldeco.c)
-            # if (before31) { DecompressSize = TopicBlockSize = 2048; }
-            # else { TopicBlockSize = 4096; }
+            block_size_, data_len2, prev_block, next_block, data_len1, record_type = struct.unpack("<lllllB", raw_link)
             if before31:
-                topic_block_size = 2048
-            else:
-                # TopicBlockSize based on system file header flags (following helldeco.c SysLoad)
-                if self.system_file and self.system_file.header.flags == 8:
-                    topic_block_size = 2048
-                else:
-                    topic_block_size = 4096
-
-            block_data_size = topic_block_size - 12  # Subtract header size
-            block_data_raw = self.raw_data[offset + 12 : offset + 12 + block_data_size]
-
-            if is_lz_compressed:
-                # Use method 2 (LZ77) for topic block decompression
-                # Method is determined by system file flags as per helpfile.md
-                block_data = decompress(method=2, data=block_data_raw)
-            else:
-                block_data = block_data_raw
-
-            # TOPICLINK pointers use TOPICPOS coordinates, not physical offsets
-            # in |TOPIC. For WinHelp 3.1+ every physical block maps onto a
-            # virtual 16 KiB region, even when the stream itself is uncompressed.
-            # A block may begin with continuation bytes from a link that started
-            # in the previous block, so begin at the header's first complete
-            # TOPICLINK rather than blindly parsing block_data[0].
-            virtual_block_size = 2048 if before31 else 0x4000
-            topic_pos = block_index * virtual_block_size + 12
-            first_link_offset = first_topic_link - topic_pos
-            if 0 <= first_link_offset < len(block_data):
-                parse_data = block_data
-                next_physical_offset = offset + topic_block_size
-                if next_physical_offset + 12 <= len(self.raw_data):
-                    next_header = self.raw_data[next_physical_offset : next_physical_offset + 12]
-                    _next_last, next_first_link, _next_topic_header = struct.unpack("<lll", next_header)
-                    next_topic_pos = (block_index + 1) * virtual_block_size + 12
-                    continuation_size = next_first_link - next_topic_pos
-                    if continuation_size > 0:
-                        next_raw = self.raw_data[next_physical_offset + 12 : next_physical_offset + topic_block_size]
-                        next_data = decompress(method=2, data=next_raw) if is_lz_compressed else next_raw
-                        parse_data += next_data[:continuation_size]
-                self._parse_links(parse_data, before31, topic_pos, first_link_offset)
-
-            offset += topic_block_size
-            block_index += 1
-
-    def _parse_links(
-        self,
-        block_data: bytes,
-        before31: bool = False,
-        topic_pos: int = 0,
-        first_link_offset: int = 0,
-    ):
-        """
-        Parses the topic links within a topic block.
-        """
-        offset = first_link_offset
-        while offset < len(block_data):
-            # TOPICLINK structure is always 21 bytes regardless of version
-            # The difference between Win 3.0 and 3.1+ is in field interpretation, not size
-            raw_bytes = block_data[offset : offset + 21]
-            if len(raw_bytes) < 21:
+                if topic_pos + next_block >= len(self.raw_data):
+                    break
+            elif next_block <= 0:
+                break
+            if data_len1 < 21 or block_size_ < data_len1:
                 break
 
-            try:
-                block_size, data_len2, prev_block, next_block, data_len1, record_type = struct.unpack(
-                    "<LLLLLb", raw_bytes
-                )
-            except struct.error as e:
-                warnings.warn(f"Failed to unpack TOPICLINK at offset {offset}: {e}")
-                break
-            _link_offset = 21
+            link_data1 = reader.read(reader.position, data_len1 - 21) if data_len1 > 21 else b""
+            link_data2 = reader.read(reader.position, block_size_ - data_len1) if data_len1 < block_size_ else b""
 
-            record_offset = topic_pos + offset
             parsed_link = {
-                "block_size": block_size,
+                "block_size": block_size_,
                 "data_len2": data_len2,
                 "prev_block": prev_block,
                 "next_block": next_block,
                 "data_len1": data_len1,
                 "record_type": record_type,
-                "record_offset": record_offset,
+                "record_offset": topic_pos,
             }
+            link = TopicLink(**parsed_link, raw_data={"raw": raw_link, "parsed": parsed_link})
+            if before31 and record_type == 0x02:
+                # HC30 addresses topics by the TOPICPOS of their header
+                # (helpdeco.c: `if (before31) TopicOffset = TopicPos;`).
+                self.topic_offset = topic_pos
+            self._parse_link_data(link, link_data1, link_data2, before31, topic_pos)
 
-            # Validate the TopicLink structure (minimal validation like helpdeco.c)
-            # Check for clearly invalid values that would cause parsing errors
-            if block_size <= 0 or data_len1 < 21:  # data_len1 must include TOPICLINK size (21 bytes)
-                break
-            if data_len1 > block_size:  # data_len1 cannot be larger than total block size
-                break
-
-            # Additional validation: check for reasonable values to prevent misalignment
-            if block_size > 32768:  # Unreasonably large block size (32KB limit)
-                break
-            if data_len2 > 1048576:  # Unreasonably large data_len2 (1MB limit)
-                break
-            virtual_block_size = 2048 if before31 else 0x4000
-            physical_block_size = (
-                2048 if before31 or (self.system_file and self.system_file.header.flags == 8) else 4096
-            )
-            block_count = (len(self.raw_data) + physical_block_size - 1) // physical_block_size
-            if next_block > block_count * virtual_block_size:
-                break
-
-            # Only process known record types, skip unknown ones (like C reference does)
-            if record_type not in [0x01, 0x02, 0x20, 0x23]:
-                # Skip unknown record types silently (C reference behavior)
-                # Move to next block or exit if we can't find a valid next position
-                if block_size == 0:
-                    break
-                offset += block_size
-                continue
-
-            link = TopicLink(**parsed_link, raw_data={"raw": raw_bytes, "parsed": parsed_link})
-
-            # DataLen1 includes the size of TOPICLINK (21 bytes)
-            # LinkData1 size = DataLen1 - sizeof(TOPICLINK) = DataLen1 - 21
-            linkdata1_size = data_len1 - 21
-            linkdata2_size = block_size - data_len1
-
-            # Calculate data positions
-            data1_start = offset + 21  # After TOPICLINK structure
-            data1_end = data1_start + linkdata1_size
-            data2_start = data1_end
-            data2_end = offset + block_size
-
-            # Validate bounds
-            if (
-                data1_start < 0
-                or data1_end > len(block_data)
-                or data2_start < 0
-                or data2_end > len(block_data)
-                or data1_end > data2_start
-            ):
-                break
-
-            # Extract LinkData1 and LinkData2
-            link_data1 = block_data[data1_start:data1_end] if linkdata1_size > 0 else b""
-            link_data2 = block_data[data2_start:data2_end] if linkdata2_size > 0 else b""
-
-            self._parse_link_data(link, link_data1, link_data2, before31, record_offset)
-
-            if block_size == 0:
-                break
-
-            # Advance to next TOPICLINK
-            # From helldeco.h comments:
-            # Windows 3.0 (HC30): NextBlock is number of bytes the TOPICLINK of the next block
-            # is located behind this block, including skipped TOPICBLOCKHEADER.
-            # Windows 3.1 (HC31): NextBlock is TOPICPOS of next TOPICLINK
-            if block_size == 0 or next_block <= 0:
-                break
-
-            # For Windows 3.0: NextBlock is relative offset within current block
-            # For Windows 3.1+: NextBlock is absolute position, use NextTopicOffset logic
             if before31:
-                # Windows 3.0: relative offset within block
-                offset += next_block
+                topic_pos += next_block
             else:
-                # Windows 3.1+: NextBlock is absolute position
-                # Convert absolute position to relative offset within current block
-                relative_offset = next_block - topic_pos
-
-                # If the next link is within this block, jump to it
-                if 0 <= relative_offset < len(block_data):
-                    offset = relative_offset
-                else:
-                    # Next link is in a different block, exit this block
-                    break
+                self.topic_offset = self._next_topic_offset(self.topic_offset, next_block, topic_pos)
+                topic_pos = next_block
 
     def _parse_link_data(
         self,

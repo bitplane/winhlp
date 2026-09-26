@@ -9,3 +9,4 @@ docs/pydoc
 
 # Downloaded HLP corpus archives (extracted into tests/data/corpus/)
 *.tar.gz
+build/

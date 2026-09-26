@@ -29,13 +29,13 @@ def _normalized_text(path):
     return re.sub(r"\s+", " ", text).strip()
 
 
-# WinHelp 3.0 files (SYSTEM minor 15) never used LZ77 and have always worked.
-# They pin exact topic counts and a known text snippet.
+# WinHelp 3.0 files (SYSTEM minor 15) never used LZ77. Topic counts match
+# helpdeco; a per-block link walker used to find only 19 and 3 of them.
 @pytest.mark.parametrize(
     "path, n_topics, snippet",
     [
-        ("FXSEARCH.HLP", 19, "F/X Text Search Help Index"),
-        ("FXUNDEL.HLP", 3, "F/X File Undelete Help Index"),
+        ("FXSEARCH.HLP", 84, "F/X Text Search Help Index"),
+        ("FXUNDEL.HLP", 31, "F/X File Undelete Help Index"),
     ],
 )
 def test_win30_topic_content(path, n_topics, snippet):
@@ -220,3 +220,10 @@ def test_topicid_supplies_real_context_names():
     hlp = HelpFile(filepath=os.path.join(DATA, "topicid", "ICQPhPl.hlp"))
     assert list(hlp.topicid.context_topic_map) == ["ICQ_Version_2000b"]
     assert "ICQ_Version_2000b" in hlp.topic.get_all_topics()[0].context_names
+
+
+def test_win30_topic_offsets_are_header_topicpos():
+    # HC30 |CTXOMAP entries address topics by the TOPICPOS of their header.
+    hlp = HelpFile(filepath=os.path.join(DATA, "FXSEARCH.HLP"))
+    offsets = {t.topic_offset for t in hlp.topic.get_all_topics()}
+    assert all(entry.topic_offset in offsets for entry in hlp.ctxomap.entries)
