@@ -83,6 +83,10 @@ make test      # run the test suite
 make coverage  # HTML coverage report in htmlcov/
 ```
 
+`scripts/compare_helpdeco.py <files or dirs>` checks extracted text against
+helpdeco. It builds helpdeco from `ref/` with gcc, decompiles each file to RTF,
+and reports word-level agreement per file, with the worst diffs.
+
 ## License
 
 GPLv2, because that's what the original is.
