@@ -1639,12 +1639,8 @@ class WinHlpApp(App):
             lines.append(
                 f"  WinPos: {'parsed' if self.helpfile.winpos and self.helpfile.winpos.btree else 'unavailable'}"
             )
-            lines.append(
-                f"  CntJump entries: {len(self.helpfile.cntjump.jump_references) if self.helpfile.cntjump else 0}"
-            )
-            lines.append(
-                f"  CntText entries: {len(self.helpfile.cnttext.topic_titles) if self.helpfile.cnttext else 0}"
-            )
+            lines.append(f"  CntJump entries: {len(self.helpfile.cntjump.jumps) if self.helpfile.cntjump else 0}")
+            lines.append(f"  CntText entries: {len(self.helpfile.cnttext.titles) if self.helpfile.cnttext else 0}")
             lines.append(f"  Pete bytes: {len(self.helpfile.pete.raw_data) if self.helpfile.pete else 0}")
             lines.append(f"  Flags bytes: {len(self.helpfile.flags.raw_data) if self.helpfile.flags else 0}")
         if self.helpfile.parse_errors:

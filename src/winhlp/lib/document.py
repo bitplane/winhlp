@@ -112,16 +112,34 @@ class HelpDocument:
         return self.topics[0] if self.topics else None
 
     def _load_cnt(self):
+        """Load Contents from the sibling .CNT, else from a GID's cached copy."""
         system = getattr(self.helpfile, "system", None)
         filename = getattr(system, "cnt_filename", None)
-        if not filename:
-            return None
-        from .cnt import load_cnt
+        if filename:
+            from .cnt import load_cnt
 
-        sibling = Path(self.helpfile.filepath).resolve().parent / Path(filename.replace("\\", "/")).name
-        if not sibling.is_file():
-            return None
-        return load_cnt(sibling, getattr(system, "encoding", "cp1252"))
+            sibling = Path(self.helpfile.filepath).resolve().parent / Path(filename.replace("\\", "/")).name
+            if sibling.is_file():
+                return load_cnt(sibling, getattr(system, "encoding", "cp1252"))
+        return self._load_gid_contents()
+
+    def _load_gid_contents(self):
+        from .internal_files.gid import gid_contents
+
+        source = self.helpfile
+        if getattr(source, "cnttext", None) is None:
+            gid = _sibling_gid(Path(self.helpfile.filepath))
+            if gid is None:
+                return None
+            from .hlp import HelpFile
+
+            try:
+                source = HelpFile(filepath=str(gid))
+            except Exception:
+                return None
+        return gid_contents(
+            getattr(source, "cnttext", None), getattr(source, "cntjump", None), getattr(source, "flags", None)
+        )
 
     def topic_by_number(self, number: int) -> Optional[ParsedTopic]:
         return self._by_number.get(number)
@@ -186,10 +204,7 @@ class HelpDocument:
     @property
     def has_authored_contents(self) -> bool:
         """Whether a CNT/GID source supplies a curated Contents hierarchy."""
-        return bool(
-            (self.cnt and self.cnt.entries)
-            or (getattr(self.helpfile, "cnttext", None) and getattr(self.helpfile.cnttext, "topic_titles", None))
-        )
+        return bool(self.cnt and self.cnt.entries)
 
     def contents_entries(self) -> list[NavigationEntry]:
         if self.cnt and self.cnt.entries:
@@ -206,26 +221,6 @@ class HelpDocument:
                         (topic,) if topic else (),
                         reference,
                         "CNT",
-                    )
-                )
-            return entries
-        cnttext = getattr(self.helpfile, "cnttext", None)
-        if cnttext and cnttext.topic_titles:
-            jumps = getattr(getattr(self.helpfile, "cntjump", None), "jump_references", [])
-            entries = []
-            for index, title in enumerate(cnttext.topic_titles):
-                reference = str(jumps[index]) if index < len(jumps) else ""
-                topic = self.topic_by_context_name(reference) or self.topic_by_context_name(title)
-                level = (len(title) - len(title.lstrip("\t"))) + (len(title) - len(title.lstrip(" "))) // 2
-                entries.append(
-                    NavigationEntry(
-                        title.lstrip(),
-                        topic,
-                        level,
-                        "topic" if topic else "unresolved",
-                        (topic,) if topic else (),
-                        reference,
-                        "GID",
                     )
                 )
             return entries
@@ -353,7 +348,7 @@ class HelpDocument:
     def _qualify_cnt_reference(self, reference: str, base_file: str) -> str:
         if not reference or "@" in reference or not base_file:
             return reference
-        if Path(base_file.replace("\\", "/")).name.casefold() == Path(self.helpfile.filepath).name.casefold():
+        if _same_file_name(base_file, self.helpfile.filepath):
             return reference
         context, separator, window = reference.partition(">")
         return f"{context}{'>' + window if separator else ''}@{base_file}"
@@ -369,6 +364,8 @@ class HelpDocument:
         if not filename and self.cnt and self.cnt.base_file:
             filename, _, base_window = self.cnt.base_file.partition(">")
             window = window or base_window
+        if filename and _same_file_name(filename, self.helpfile.filepath):
+            filename = ""
         if filename or window:
             fields = [f"context_name:{local}"]
             if filename:
@@ -627,3 +624,19 @@ def _split_external_reference(reference: str) -> tuple[str, str, str]:
     local, at, filename = reference.partition("@")
     context, separator, window = local.partition(">")
     return context, window if separator else "", filename if at else ""
+
+
+def _sibling_gid(path: Path) -> Optional[Path]:
+    """Find the WinHlp32-generated .GID next to a help file, in any case."""
+    if path.suffix.casefold() == ".gid":
+        return None
+    try:
+        candidates = list(path.resolve().parent.iterdir())
+    except OSError:
+        return None
+    wanted = (path.stem + ".gid").casefold()
+    return next((candidate for candidate in candidates if candidate.name.casefold() == wanted), None)
+
+
+def _same_file_name(filename: str, filepath: str) -> bool:
+    return Path(filename.replace("\\", "/")).name.casefold() == Path(filepath).name.casefold()

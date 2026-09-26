@@ -247,14 +247,15 @@ def test_layout_uses_record_offsets_for_fixed_boundary():
     assert layout.scrolling_blocks == (scrolling,)
 
 
-def test_gid_contents_preserves_hierarchy_and_unresolved_books():
+def test_gid_contents_use_flags_levels_and_keyed_jumps():
     topic = ParsedTopic(topic_number=1, title="Child", context_names=["CTX_CHILD"], topic_offset=100, raw_data={})
     fake = SimpleNamespace(
         filepath="sample.gid",
         system=None,
         get_topics=lambda: [topic],
-        cnttext=SimpleNamespace(topic_titles=["Book", "  Child"]),
-        cntjump=SimpleNamespace(jump_references=["", "CTX_CHILD"]),
+        cnttext=SimpleNamespace(titles={1: "Book", 2: "Child"}, title="", base_file=""),
+        cntjump=SimpleNamespace(jumps={2: "CTX_CHILD"}),
+        flags=SimpleNamespace(contents_flags=[0x10, 0x22]),
         keyword_search_files={},
         keyword_index_files={},
     )
@@ -262,10 +263,40 @@ def test_gid_contents_preserves_hierarchy_and_unresolved_books():
     entries = HelpDocument(fake).contents_entries()
 
     assert [(entry.label, entry.level, entry.kind) for entry in entries] == [
-        ("Book", 0, "unresolved"),
+        ("Book", 0, "book"),
         ("Child", 1, "topic"),
     ]
     assert entries[1].topic is topic
+
+
+def test_real_gid_contents_are_parsed_by_key():
+    gid = HelpFile(filepath=os.path.join(DATA, "gid", "odbcinst.GID"))
+
+    assert gid.cnttext.title == "ODBC Help"
+    assert gid.cnttext.base_file == "odbcinst.hlp"
+    assert gid.cnttext.titles[1] == "User DSN Tab"
+    assert gid.cntjump.jumps[1] == "User_DSN_Tab>ref"
+    assert gid.flags.contents_flags == [0x12] * 5
+
+    contents = HelpDocument(gid).cnt
+    assert [(entry.label, entry.level, entry.reference) for entry in contents.entries[:2]] == [
+        ("User DSN Tab", 0, "User_DSN_Tab>ref"),
+        ("System DSN Tab", 0, "System_DSN_Tab>ref"),
+    ]
+
+
+def test_cnt_base_naming_this_file_resolves_locally(tmp_path):
+    source = Path(DATA) / "SMARTTOP.HLP"
+    target = tmp_path / "SMARTTOP.HLP"
+    target.write_bytes(source.read_bytes())
+    document = HelpDocument(HelpFile(filepath=str(target)))
+    context = document.topics[1].context_names[0]
+    document.cnt = SimpleNamespace(base_file="smarttop.hlp", entries=(), indices=())
+
+    resolved = document.resolve_cnt_target(context)
+
+    assert resolved.kind == "topic"
+    assert resolved.topic is document.topics[1]
 
 
 def test_external_context_hash_fields_resolve_signed_and_unknown_values():
