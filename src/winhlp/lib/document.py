@@ -182,12 +182,6 @@ class HelpDocument:
             if any(context.casefold() == folded for context in topic.context_names):
                 return topic
 
-        topicid = getattr(self.helpfile, "topicid", None)
-        if topicid is not None:
-            for context_name, offset in topicid.context_topic_map.items():
-                if context_name.casefold() == folded:
-                    return self.topic_for_offset(offset)
-
         context = getattr(self.helpfile, "context", None)
         if context is None:
             return None

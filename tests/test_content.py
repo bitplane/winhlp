@@ -206,3 +206,17 @@ def test_corrupt_hall_index_is_reported_without_aborting_help_file(tmp_path):
     assert damaged.phrindex is None
     assert any(error["file"] == "|PhrIndex" and "phrase count" in error["error"] for error in damaged.parse_errors)
     assert damaged.get_topic_count() == original.get_topic_count()
+
+
+def test_btree_internal_files_are_loaded_without_file_header():
+    # |TTLBTREE, |TopicId and |Rose used to receive the 9-byte FILEHEADER, so
+    # their B-trees never parsed.
+    hlp = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP"))
+    assert hlp.ttlbtree.btree is not None
+    assert len(hlp.ttlbtree.entries) == 8
+
+
+def test_topicid_supplies_real_context_names():
+    hlp = HelpFile(filepath=os.path.join(DATA, "topicid", "ICQPhPl.hlp"))
+    assert list(hlp.topicid.context_topic_map) == ["ICQ_Version_2000b"]
+    assert "ICQ_Version_2000b" in hlp.topic.get_all_topics()[0].context_names

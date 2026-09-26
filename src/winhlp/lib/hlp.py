@@ -311,6 +311,11 @@ class HelpFile(BaseModel):
             except Exception:
                 pass
 
+        # |TopicId lists the real context ids (HCRTF /a); helpdeco stops guessing
+        # when it is present.
+        if self.topicid:
+            for name in self.topicid.context_topic_map:
+                add(name)
         # Candidate names from keyword footnotes (real, author-written strings).
         for group in (self.keyword_search_files, self.keyword_index_files):
             for entry in group.values():
@@ -623,38 +628,14 @@ class HelpFile(BaseModel):
     def _parse_topicid(self) -> TopicIdFile:
         """
         Parses the |TopicId internal file.
-
-        Note: Uses full raw_data including file header for TopicIdFile.
         """
-        if "|TopicId" not in self.directory.files:
-            return None
-
-        topicid_offset = self.directory.files["|TopicId"]
-        file_header_data = self.data[topicid_offset : topicid_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-        topicid_data = self.data[topicid_offset : topicid_offset + 9 + used_space]
-        return TopicIdFile(filename="|TopicId", raw_data=topicid_data)
+        return self._load_internal_file("|TopicId", TopicIdFile)
 
     def _parse_ttlbtree(self) -> TTLBTreeFile:
         """
         Parses the |TTLBTREE internal file.
-
-        Note: Uses full raw_data including file header for TTLBTreeFile.
         """
-        if "|TTLBTREE" not in self.directory.files:
-            return None
-
-        ttlbtree_offset = self.directory.files["|TTLBTREE"]
-        file_header_data = self.data[ttlbtree_offset : ttlbtree_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-        ttlbtree_data = self.data[ttlbtree_offset : ttlbtree_offset + 9 + used_space]
-        return TTLBTreeFile(filename="|TTLBTREE", raw_data=ttlbtree_data, system_file=self.system)
+        return self._load_internal_file("|TTLBTREE", TTLBTreeFile, system_file=self.system)
 
     def _parse_bitmaps(self) -> Dict[str, BitmapFile]:
         """
@@ -1102,18 +1083,7 @@ class HelpFile(BaseModel):
         """
         Parses the |Rose internal file.
         """
-        if "|Rose" not in self.directory.files:
-            return None
-
-        rose_offset = self.directory.files["|Rose"]
-        # We need to read the file header to know the size of the |Rose file
-        file_header_data = self.data[rose_offset : rose_offset + 9]
-        if len(file_header_data) < 9:
-            return None
-        reserved_space, used_space, file_flags = struct.unpack("<llB", file_header_data)
-
-        rose_data = self.data[rose_offset : rose_offset + 9 + used_space]
-        return RoseFile(filename="|Rose", raw_data=rose_data)
+        return self._load_internal_file("|Rose", RoseFile)
 
     def get_macro_by_hash(self, keyword_hash: int) -> Optional[str]:
         """
