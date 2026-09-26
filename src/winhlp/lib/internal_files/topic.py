@@ -10,6 +10,7 @@ import warnings
 # Topic formatting command bytes we have already warned about, so an unknown
 # command in a large corpus produces one warning per byte value, not thousands.
 _WARNED_TOPIC_COMMANDS: set = set()
+_WARNED_RECORD_TYPES: set = set()
 
 
 def safe_unpack_from(format_str: str, data: bytes, offset: int, default_value=None):
@@ -1160,8 +1161,8 @@ class TopicFile(InternalFile):
             # Unknown record type. _parse_links only dispatches 0x01/0x02/0x20/0x23
             # so this is normally unreachable, but degrade gracefully rather than
             # crash the whole file if a new/undocumented type ever reaches here.
-            if link.record_type not in _WARNED_TOPIC_COMMANDS:
-                _WARNED_TOPIC_COMMANDS.add(link.record_type)
+            if link.record_type not in _WARNED_RECORD_TYPES:
+                _WARNED_RECORD_TYPES.add(link.record_type)
                 warnings.warn(f"Skipping unknown TOPICLINK record type 0x{link.record_type:02X}")
 
     def _parse_topic_header(self, data: bytes, before31: bool = False):
@@ -1702,6 +1703,9 @@ class TopicFile(InternalFile):
                     "is_popup": is_popup,
                 }
                 p1 = data_end
+            elif not any(linkdata1[p1:]):
+                # Some compilers omit the 0xFF terminator and pad with NULs.
+                break
             else:
                 # Unknown command byte: advance by one, matching helpdeco's
                 # `default: ptr++;`. Warn once per byte value so gaps are visible.
