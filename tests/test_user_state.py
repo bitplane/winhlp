@@ -65,3 +65,21 @@ def test_wrong_shaped_user_state_is_ignored_with_diagnostic(tmp_path, payload):
 
     assert state.diagnostic
     assert not state.bookmarks and not state.notes
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"version": 1, "bookmarks": [{"topic_offset": 7}, {"topic_offset": "invalid"}]},
+        {"version": 1, "bookmarks": [{"topic_offset": 7}], "notes": {"8": "valid", "invalid": "note"}},
+    ],
+)
+def test_invalid_later_entry_discards_all_user_state(tmp_path, payload):
+    help_path = tmp_path / "manual.hlp"
+    (tmp_path / "manual.hlp.user.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    state = UserState.for_help_file(help_path)
+
+    assert state.diagnostic
+    assert state.bookmarks == {}
+    assert state.notes == {}

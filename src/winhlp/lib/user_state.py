@@ -45,19 +45,24 @@ class UserState:
                 raise ValueError("bookmarks must be a list of objects")
             if not isinstance(notes, dict):
                 raise ValueError("notes must be an object")
+            parsed_bookmarks = {}
+            parsed_notes = {}
             for item in bookmarks:
                 offset = int(item["topic_offset"])
                 if offset >= 0:
-                    state.bookmarks[offset] = Bookmark(
+                    parsed_bookmarks[offset] = Bookmark(
                         offset, str(item.get("title", "")), str(item.get("context_name", ""))
                     )
             for key, value in notes.items():
                 offset = int(key)
                 text = str(value)
                 if offset >= 0 and text:
-                    state.notes[offset] = text
+                    parsed_notes[offset] = text
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
             state.diagnostic = f"{path.name}: {error}"
+        else:
+            state.bookmarks = parsed_bookmarks
+            state.notes = parsed_notes
         return state
 
     def toggle_bookmark(self, topic) -> bool:
