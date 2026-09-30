@@ -52,6 +52,19 @@ def test_html_export_structure_and_content(path, snippet):
     assert "<script" not in out.lower()
 
 
+def test_html_export_includes_escaped_topic_annotations():
+    hlp = HelpFile(filepath=os.path.join(DATA, "win311/SOL.HLP"))
+    topic = hlp.get_document().topics[0]
+    topic.annotations.append("A user note <private> & more")
+
+    out = export_html(hlp)
+    section = out.split('<section id="topic-0">', 1)[1].split("</section>", 1)[0]
+
+    assert '<aside class="annotations">' in section
+    assert "A user note &lt;private&gt; &amp; more" in section
+    assert "<private>" not in section
+
+
 def test_html_images_embedded_as_data_uri():
     hlp = HelpFile(filepath=os.path.join(DATA, "win311/SOL.HLP"))
     out = export_html(hlp, images="embed")

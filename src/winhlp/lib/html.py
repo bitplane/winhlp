@@ -104,6 +104,7 @@ td {{ border: 1px solid #ccc; padding: 0.3em 0.6em; vertical-align: top; }}
 img {{ max-width: 100%; }}
 a.popup {{ border-bottom: 1px dotted; }}
 a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
+.annotations {{ border-left: 3px solid #ccc; margin-top: 1em; padding-left: 1em; }}
 {font_css}
 </style>
 </head>
@@ -149,6 +150,9 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
             parts.append(self._render_spans(topic.text_spans))
             for table in topic.tables:
                 parts.append(self._render_table(table))
+        if topic.annotations:
+            notes = "\n".join(f"<li>{html.escape(note)}</li>" for note in topic.annotations)
+            parts.append(f'<aside class="annotations"><h3>Annotations</h3><ul>{notes}</ul></aside>')
         parts.append("</section>")
         return "\n".join(p for p in parts if p)
 
