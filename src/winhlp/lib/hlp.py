@@ -283,6 +283,16 @@ class HelpFile(BaseModel):
                 ann_path = candidate
                 break
         if ann_path is None:
+            directory = os.path.dirname(self.filepath) or "."
+            wanted = (os.path.basename(base) + ".ann").casefold()
+            try:
+                ann_path = next(
+                    (os.path.join(directory, name) for name in os.listdir(directory) if name.casefold() == wanted),
+                    None,
+                )
+            except OSError:
+                pass
+        if ann_path is None:
             return
         try:
             # Lazy import: ann.py imports HelpFile, so importing it at module

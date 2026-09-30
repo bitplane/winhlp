@@ -232,3 +232,9 @@ def test_annotation_container_is_opened_once_and_attached_to_help_topic(tmp_path
     assert helpfile.get_topics()[1].annotations == ["A user note"]
     assert not helpfile.parse_errors
     assert ann_opens == 1
+
+    ann_path.with_suffix(".ann").rename(ann_path.with_suffix(".Ann"))
+    ann_opens = 0
+    mixed_case = HelpFile(filepath=str(help_path))
+    assert mixed_case.get_topics()[1].annotations == ["A user note"]
+    assert ann_opens == 1
