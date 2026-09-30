@@ -90,6 +90,13 @@ def test_parse_font_facenames():
     assert len(hlp_file.font.facenames) > 0
 
 
+def test_config_macros_are_read_from_short_internal_files():
+    filepath = os.path.join(os.path.dirname(__file__), "data", "win95", "WINDOWS.HLP")
+    hlp_file = HelpFile(filepath=filepath)
+
+    assert hlp_file.get_config_macros(0) == ["CS()"]
+
+
 def test_parse_topic_blocks():
     """Tests parsing of the |TOPIC file blocks."""
     filepath = os.path.join(os.path.dirname(__file__), "data", "FXSEARCH.HLP")

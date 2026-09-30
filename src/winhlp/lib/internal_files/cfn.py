@@ -43,12 +43,8 @@ class CFnFile(InternalFile):
         """
         Parses the |CFn file data.
         """
-        if len(self.raw_data) < 9:  # Need at least file header
-            return
-
-        # Skip the file header (9 bytes: reserved_space + used_space + file_flags)
-        data_start = 9
-        cfn_data = self.raw_data[data_start:]
+        # HelpFile has already removed the internal FILEHEADER.
+        cfn_data = self.raw_data
 
         # Parse null-terminated macro strings
         offset = 0
