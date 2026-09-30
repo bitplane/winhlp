@@ -27,3 +27,12 @@ def test_cyclic_leaf_chain_raises(next_pages):
 def test_acyclic_leaf_chain_visits_each_page_once(next_pages):
     tree = make_tree(next_pages)
     assert list(tree.iterate_leaf_pages()) == [(page, 1) for page in tree.pages]
+
+
+def test_next_page_buffer_offset_points_at_page_just_read():
+    tree = make_tree([1, -1])
+    _, buffer = tree.get_first_page()
+
+    assert tree.get_next_page(buffer) == 1
+    assert buffer.current_offset == 38 + tree.header.page_size + 8
+    assert buffer.next_page == -1
