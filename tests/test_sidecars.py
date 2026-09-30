@@ -10,6 +10,17 @@ import struct
 from winhlp.lib.ann import LinkFile, AnnotationTextFile
 from winhlp.lib.internal_files.bitmap import BitmapFile, ExtractedBitmap, BitmapHeader
 from winhlp.lib.internal_files.grp import GRPFile
+from winhlp.lib.internal_files.petra import PetraFile
+
+
+def test_petra_reads_null_terminated_btree_entries():
+    header = struct.pack("<HHH16shhhhhhi", 0x293B, 2, 128, b"Lz", 0, 0, 0, -1, 1, 1, 2)
+    leaf = struct.pack("<hhhh", 0, 2, -1, -1)
+    leaf += struct.pack("<L", 100) + b"first.rtf\x00"
+    leaf += struct.pack("<L", 200) + b"second.rtf\x00"
+    petra = PetraFile(header + leaf.ljust(128, b"\x00"))
+
+    assert petra.entries == {100: "first.rtf", 200: "second.rtf"}
 
 
 def test_grp_file_constructs_and_parses():

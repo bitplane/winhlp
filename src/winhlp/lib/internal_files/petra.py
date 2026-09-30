@@ -51,130 +51,37 @@ class PetraFile(InternalFile):
         self._parse()
 
     def _parse(self):
-        """Parse the |Petra file structure."""
-        if len(self.raw_data) < 4:
+        """Parse the |Petra B+ tree and its NUL-terminated leaf entries."""
+        if len(self.raw_data) < 38:
             return
-
         try:
-            # Initialize B+ tree for Petra file
             self.btree = BTree(self.raw_data)
-
-            # Parse all leaf nodes to extract topic offset -> filename mappings
-            self._parse_leaf_nodes()
-
+            for page, n_entries in self.btree.iterate_leaf_pages():
+                self._parse_leaf_page(page, n_entries)
         except Exception:
-            # If B+ tree parsing fails, try to parse as simple list
-            self._parse_as_simple_list()
+            # A malformed optional index should not abort the whole help file.
+            self.entries.clear()
+            self.petra_entries.clear()
 
-    def _parse_leaf_nodes(self):
-        """Parse B+ tree leaf nodes to extract Petra entries."""
-        if not self.btree:
-            return
-
-        try:
-            # Get all leaf pages from the B+ tree
-            leaf_pages = self.btree.get_leaf_pages()
-
-            for page_data in leaf_pages:
-                self._parse_leaf_page(page_data)
-
-        except Exception:
-            # Fall back to simple parsing if B+ tree traversal fails
-            self._parse_as_simple_list()
-
-    def _parse_leaf_page(self, page_data: bytes):
-        """Parse a single leaf page containing Petra entries."""
-        offset = 0
-
-        while offset + 8 < len(page_data):  # Need at least 8 bytes for topic offset + length
-            try:
-                # Read topic offset (4 bytes)
-                topic_offset = struct.unpack_from("<L", page_data, offset)[0]
-                offset += 4
-
-                # Read filename length (2 bytes) - assuming short length prefix
-                if offset + 2 > len(page_data):
-                    break
-
-                filename_length = struct.unpack_from("<H", page_data, offset)[0]
-                offset += 2
-
-                # Read filename string
-                if offset + filename_length > len(page_data):
-                    break
-
-                rtf_filename = page_data[offset : offset + filename_length].decode("cp1252", errors="replace")
-                # Remove null terminator if present
-                if rtf_filename.endswith("\x00"):
-                    rtf_filename = rtf_filename[:-1]
-
-                offset += filename_length
-
-                # Store the mapping
-                self.entries[topic_offset] = rtf_filename
-
-                # Create structured entry
-                petra_entry = PetraEntry(
-                    topic_offset=topic_offset,
-                    rtf_filename=rtf_filename,
-                    raw_data={
-                        "topic_offset": topic_offset,
-                        "filename_length": filename_length,
-                        "rtf_filename": rtf_filename,
-                    },
+    def _parse_leaf_page(self, page_data: bytes, n_entries: int):
+        offset = 8  # BTREENODEHEADER
+        for _ in range(n_entries):
+            if offset + 4 > len(page_data):
+                break
+            start = offset
+            topic_offset = struct.unpack_from("<L", page_data, offset)[0]
+            offset += 4
+            end = page_data.find(b"\x00", offset)
+            if end < 0:
+                break
+            rtf_filename = page_data[offset:end].decode("cp1252", errors="replace")
+            offset = end + 1
+            self.entries[topic_offset] = rtf_filename
+            self.petra_entries.append(
+                PetraEntry(
+                    topic_offset=topic_offset, rtf_filename=rtf_filename, raw_data={"raw": page_data[start:offset]}
                 )
-                self.petra_entries.append(petra_entry)
-
-            except (struct.error, UnicodeDecodeError, IndexError):
-                # Skip malformed entry
-                offset += 1
-                continue
-
-    def _parse_as_simple_list(self):
-        """Fallback parsing method for non-B+ tree Petra files."""
-        offset = 0
-
-        while offset + 8 < len(self.raw_data):
-            try:
-                # Try to find topic offset pattern (4 bytes)
-                topic_offset = struct.unpack_from("<L", self.raw_data, offset)[0]
-
-                # Skip obviously invalid offsets
-                if topic_offset == 0 or topic_offset > 0x10000000:
-                    offset += 1
-                    continue
-
-                offset += 4
-
-                # Look for null-terminated string after offset
-                filename_start = offset
-                while offset < len(self.raw_data) and self.raw_data[offset] != 0x00:
-                    offset += 1
-
-                if offset > filename_start and offset < len(self.raw_data):
-                    rtf_filename = self.raw_data[filename_start:offset].decode("cp1252", errors="replace")
-                    offset += 1  # Skip null terminator
-
-                    # Only add if filename looks reasonable
-                    if rtf_filename and len(rtf_filename) < 256:
-                        self.entries[topic_offset] = rtf_filename
-
-                        petra_entry = PetraEntry(
-                            topic_offset=topic_offset,
-                            rtf_filename=rtf_filename,
-                            raw_data={
-                                "topic_offset": topic_offset,
-                                "rtf_filename": rtf_filename,
-                                "parsing_method": "simple_list",
-                            },
-                        )
-                        self.petra_entries.append(petra_entry)
-                else:
-                    offset = filename_start + 1
-
-            except (struct.error, UnicodeDecodeError, IndexError):
-                offset += 1
-                continue
+            )
 
     def get_rtf_filename(self, topic_offset: int) -> Optional[str]:
         """Get the RTF source filename for a given topic offset."""
