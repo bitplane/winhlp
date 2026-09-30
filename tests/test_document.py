@@ -166,6 +166,17 @@ def test_cnt_include_finds_sibling_with_different_case(tmp_path: Path):
     assert not document.diagnostics
 
 
+def test_cnt_accepts_tabs_between_fields(tmp_path: Path):
+    path = tmp_path / "manual.cnt"
+    path.write_text(":Title\tManual\n1\tChapter=CTX_CHAPTER\n", encoding="cp1252")
+
+    document = load_cnt(path)
+
+    assert document.title == "Manual"
+    assert [(entry.label, entry.reference) for entry in document.entries] == [("Chapter", "CTX_CHAPTER")]
+    assert not document.diagnostics
+
+
 def test_included_contents_references_use_their_own_base_file(tmp_path: Path):
     (tmp_path / "child.cnt").write_text(":Base CHILD.HLP\n1 Child=CTX_CHILD\n", encoding="cp1252")
     (tmp_path / "root.cnt").write_text(":Base ROOT.HLP\n:Include child.cnt\n", encoding="cp1252")

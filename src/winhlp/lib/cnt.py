@@ -55,7 +55,9 @@ def _load_cnt(path: Path, encoding: str, stack: tuple[Path, ...]) -> CntDocument
         if not line or line.startswith(";"):
             continue
         if line.startswith(":"):
-            command, _, value = line[1:].partition(" ")
+            parts = line[1:].split(maxsplit=1)
+            command = parts[0]
+            value = parts[1] if len(parts) > 1 else ""
             command = command.casefold()
             value = value.strip()
             if command == "title":
@@ -88,10 +90,11 @@ def _load_cnt(path: Path, encoding: str, stack: tuple[Path, ...]) -> CntDocument
                 indices.extend(included.indices)
                 diagnostics.extend(f"{requested}: {message}" for message in included.diagnostics)
             continue
-        level_text, separator, body = line.partition(" ")
-        if not separator or not level_text.isdigit():
+        parts = line.split(maxsplit=1)
+        if len(parts) < 2 or not parts[0].isdigit():
             diagnostics.append(f"line {number}: unrecognized CNT entry")
             continue
+        level_text, body = parts
         label, has_target, reference = body.strip().partition("=")
         entries.append(
             CntEntry(
