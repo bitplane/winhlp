@@ -7,8 +7,12 @@ Based on helpdeco by Manfred Winterhoff, Ben Collver + Paul Wise.
 
 from .lib.hlp import HelpFile
 from .lib.exceptions import HLPError, InvalidHLPFileError, BTreeError
+from importlib.metadata import PackageNotFoundError, version
 
-__version__ = "0.0.1"
+try:
+    __version__ = version("winhlp")
+except PackageNotFoundError:
+    __version__ = "0+unknown"
 __author__ = "Gareth Davidson"
 __email__ = "gaz@bitplane.net"
 
