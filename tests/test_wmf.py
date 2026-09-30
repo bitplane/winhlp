@@ -59,8 +59,8 @@ def test_html_wmf_is_rendered_as_png(wmf, mode, tmp_path):
         assert src.startswith("data:image/png;base64,")
         data = base64.b64decode(src.split(",", 1)[1])
     else:
-        assert src.endswith("/bm0.png")
-        data = (tmp_path / "bm0.png").read_bytes()
+        assert src.endswith(".png")
+        data = (tmp_path / src.rsplit("/", 1)[-1]).read_bytes()
     with Image.open(io.BytesIO(data)) as image:
         assert image.size == (20, 10)
         assert image.getpixel((5, 5)) == (255, 0, 0)
