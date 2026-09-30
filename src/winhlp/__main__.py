@@ -13,17 +13,19 @@ class BytesEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, obj)
 
 
-def strip_raw_data(obj):
-    """Recursively drop 'raw_data' keys so the default JSON is readable.
+def strip_raw_data(obj, *, _root=True):
+    """Drop raw blobs and the root source file bytes from default JSON.
 
     Every parsed structure stores a raw_data blob (the source bytes plus a copy
     of the parsed fields), which duplicates the model 2-3x and dominates the
     output. --raw keeps it for byte-level fidelity; by default we remove it.
     """
     if isinstance(obj, dict):
-        return {k: strip_raw_data(v) for k, v in obj.items() if k != "raw_data"}
+        return {
+            k: strip_raw_data(v, _root=False) for k, v in obj.items() if k != "raw_data" and not (_root and k == "data")
+        }
     if isinstance(obj, list):
-        return [strip_raw_data(v) for v in obj]
+        return [strip_raw_data(v, _root=False) for v in obj]
     return obj
 
 

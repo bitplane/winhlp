@@ -11,7 +11,7 @@ class FakeHelpFile:
         self.filepath = filepath
 
     def model_dump(self):
-        return {"filepath": self.filepath, "raw_data": {"bytes": b"raw"}}
+        return {"filepath": self.filepath, "data": b"source", "raw_data": {"bytes": b"raw"}}
 
 
 def test_bare_command_launches_tui(monkeypatch, tmp_path):
@@ -47,3 +47,4 @@ def test_raw_implies_json(monkeypatch, tmp_path, capsys):
     assert cli.main() == 0
     output = json.loads(capsys.readouterr().out)
     assert output["raw_data"]["bytes"] == "cmF3"
+    assert output["data"] == "c291cmNl"

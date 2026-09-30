@@ -36,6 +36,8 @@ def test_json_roundtrips_clean_and_raw(path):
     clean = strip_raw_data(full)
     json.dumps(clean, cls=BytesEncoder)
     assert not _has_key(clean, "raw_data")
+    assert "data" not in clean
+    assert full["data"] == hlp.data
 
 
 def test_clean_dump_is_smaller():
