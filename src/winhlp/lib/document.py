@@ -119,6 +119,18 @@ class HelpDocument:
             from .cnt import load_cnt
 
             sibling = Path(self.helpfile.filepath).resolve().parent / Path(filename.replace("\\", "/")).name
+            if not sibling.is_file():
+                try:
+                    sibling = next(
+                        (
+                            path
+                            for path in sibling.parent.iterdir()
+                            if path.is_file() and path.name.casefold() == sibling.name.casefold()
+                        ),
+                        sibling,
+                    )
+                except OSError:
+                    pass
             if sibling.is_file():
                 return load_cnt(sibling, getattr(system, "encoding", "cp1252"))
         return self._load_gid_contents()

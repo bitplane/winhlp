@@ -118,6 +118,22 @@ def test_cnt_parser_preserves_books_levels_targets_and_diagnostics(tmp_path: Pat
     assert "not a sibling" in contents.diagnostics[0]
 
 
+def test_cnt_sibling_lookup_ignores_filename_case(tmp_path: Path):
+    help_path = tmp_path / "manual.hlp"
+    help_path.write_bytes(b"")
+    (tmp_path / "manual.cnt").write_text(":Title Manual\n1 Chapter=TOPIC\n", encoding="cp1252")
+    helpfile = SimpleNamespace(
+        filepath=str(help_path),
+        system=SimpleNamespace(cnt_filename="MANUAL.CNT", encoding="cp1252"),
+        get_topics=lambda: [],
+    )
+
+    document = HelpDocument(helpfile)
+
+    assert document.cnt is not None
+    assert document.cnt.title == "Manual"
+
+
 def test_cnt_include_cycles_and_missing_files_are_diagnostics(tmp_path: Path):
     (tmp_path / "one.cnt").write_text(":Include two.cnt\n:Include missing.cnt\n", encoding="cp1252")
     (tmp_path / "two.cnt").write_text(":Include one.cnt\n", encoding="cp1252")
