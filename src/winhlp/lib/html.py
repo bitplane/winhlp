@@ -166,8 +166,19 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         "\\n\\n" between paragraphs, "\\n" a line break, "\\t" a tab.
         """
         paragraphs = [[]]  # list of paragraphs; each a list of html run strings
+        pending_newline = None
         for span in spans:
             text = span.text or ""
+            if pending_newline is not None:
+                if text.startswith("\n"):
+                    paragraphs.append([])
+                    text = text[1:]
+                else:
+                    paragraphs[-1].append(self._render_run(pending_newline, "\n"))
+                pending_newline = None
+            if text.endswith("\n") and not text.endswith("\n\n"):
+                text = text[:-1]
+                pending_newline = span
             # Split into paragraph chunks, keeping run formatting per chunk.
             chunks = text.split("\n\n")
             for ci, chunk in enumerate(chunks):
@@ -177,6 +188,8 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
                 # but an embedded picture) on their first chunk.
                 if chunk or (ci == 0 and span.embedded_image):
                     paragraphs[-1].append(self._render_run(span, chunk))
+        if pending_newline is not None:
+            paragraphs[-1].append(self._render_run(pending_newline, "\n"))
         html_paras = []
         for runs in paragraphs:
             inner = "".join(runs).strip()

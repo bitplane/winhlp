@@ -345,6 +345,20 @@ def test_html_embedded_image_keeps_its_hyperlink():
     assert re.search(r'<a class="jump" href="#topic-1"><img[^>]+></a>', section)
 
 
+def test_paragraph_break_spanning_two_formatted_runs():
+    hlp = HelpFile(filepath=os.path.join(DATA, "win311/SOL.HLP"))
+    spans = [
+        TextSpan(text="First\n", is_bold=True, raw_data={}),
+        TextSpan(text="\nSecond", is_italic=True, raw_data={}),
+    ]
+
+    rendered = HtmlExporter(hlp)._render_spans(spans)
+
+    assert rendered.count("<p>") == 2
+    assert "<br>" not in rendered
+    assert "First" in rendered and "Second" in rendered
+
+
 @pytest.mark.parametrize("directory", ["manual#1_images", 'manual" onerror="test_images', "help ?&% café_images"])
 def test_extracted_image_urls_round_trip_special_directory_names(tmp_path, directory):
     from html.parser import HTMLParser
