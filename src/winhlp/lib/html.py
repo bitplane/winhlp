@@ -231,7 +231,7 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
         if span.embedded_image:
             img = self._render_image(span.embedded_image)
             if img:
-                return inner + img if text.strip() else img
+                inner = inner + img if text.strip() else img
         if span.is_hyperlink and span.hyperlink_target:
             return self._render_hyperlink(span.hyperlink_target, inner)
         return inner

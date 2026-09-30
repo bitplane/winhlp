@@ -302,6 +302,29 @@ def test_html_table_preserves_links_images_and_styled_paragraphs():
     assert f".{styled.group(1)} {{ font-weight: bold }}" in out
 
 
+def test_html_embedded_image_keeps_its_hyperlink():
+    hlp = HelpFile(filepath=os.path.join(DATA, "win311/SOL.HLP"))
+    topics = hlp.get_topics()
+    topics[0].content_blocks = [
+        TopicTextBlock(
+            text_spans=[
+                TextSpan(
+                    text="",
+                    embedded_image="bitmap:inline:0",
+                    is_hyperlink=True,
+                    hyperlink_target=f"topic:TOPIC{topics[1].topic_number}",
+                    raw_data={},
+                )
+            ]
+        )
+    ]
+
+    out = export_html(hlp)
+    section = out.split('<section id="topic-0">', 1)[1].split("</section>", 1)[0]
+
+    assert re.search(r'<a class="jump" href="#topic-1"><img[^>]+></a>', section)
+
+
 @pytest.mark.parametrize("directory", ["manual#1_images", 'manual" onerror="test_images', "help ?&% café_images"])
 def test_extracted_image_urls_round_trip_special_directory_names(tmp_path, directory):
     from html.parser import HTMLParser
