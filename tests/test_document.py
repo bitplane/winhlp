@@ -155,6 +155,17 @@ def test_cnt_include_cycles_and_missing_files_are_diagnostics(tmp_path: Path):
     assert any("missing.cnt" in diagnostic for diagnostic in contents.diagnostics)
 
 
+def test_cnt_include_finds_sibling_with_different_case(tmp_path: Path):
+    (tmp_path / "CHILD.CNT").write_text("1 Child=CTX_CHILD\n", encoding="cp1252")
+    root = tmp_path / "root.cnt"
+    root.write_text(":Include child.cnt\n", encoding="cp1252")
+
+    document = load_cnt(root)
+
+    assert [entry.label for entry in document.entries] == ["Child"]
+    assert not document.diagnostics
+
+
 def test_included_contents_references_use_their_own_base_file(tmp_path: Path):
     (tmp_path / "child.cnt").write_text(":Base CHILD.HLP\n1 Child=CTX_CHILD\n", encoding="cp1252")
     (tmp_path / "root.cnt").write_text(":Base ROOT.HLP\n:Include child.cnt\n", encoding="cp1252")

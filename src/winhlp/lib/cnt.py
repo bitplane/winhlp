@@ -70,7 +70,20 @@ def _load_cnt(path: Path, encoding: str, stack: tuple[Path, ...]) -> CntDocument
                 if not requested or Path(requested).name != requested:
                     diagnostics.append(f"line {number}: CNT include is not a sibling file: {value}")
                     continue
-                included = _load_cnt(path.parent / requested, encoding, (*stack, path))
+                sibling = path.parent / requested
+                if not sibling.is_file():
+                    try:
+                        sibling = next(
+                            (
+                                candidate
+                                for candidate in path.parent.iterdir()
+                                if candidate.is_file() and candidate.name.casefold() == requested.casefold()
+                            ),
+                            sibling,
+                        )
+                    except OSError:
+                        pass
+                included = _load_cnt(sibling, encoding, (*stack, path))
                 entries.extend(included.entries)
                 indices.extend(included.indices)
                 diagnostics.extend(f"{requested}: {message}" for message in included.diagnostics)
