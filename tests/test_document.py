@@ -203,6 +203,15 @@ def test_jump_id_full_name_and_alias_resolve(name):
     assert document.resolve_target(f'macro:{name}("{topic.context_names[0]}")').topic is topic
 
 
+def test_navigation_macro_preserves_windows_path_separators():
+    document = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")).get_document()
+
+    target = document.resolve_target(r'macro:JI("C:\HELP\OTHER.HLP", "CTX")')
+
+    assert target.kind == "external"
+    assert "file:C:\\HELP\\OTHER.HLP" in target.original
+
+
 @pytest.mark.parametrize(
     "name, kind, field",
     [

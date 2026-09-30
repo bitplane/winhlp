@@ -37,12 +37,16 @@ def _parse_arguments(source: str) -> tuple[str, ...] | None:
     current = []
     quote = None
     escaped = False
-    for character in source:
+    for index, character in enumerate(source):
         if escaped:
             current.append(character)
             escaped = False
         elif character == "\\":
-            escaped = True
+            following = source[index + 1] if index + 1 < len(source) else ""
+            if following and (following == "\\" or following == quote or (not quote and following in ",()\"'`")):
+                escaped = True
+            else:
+                current.append(character)
         elif quote:
             if character == quote:
                 quote = None
