@@ -8,6 +8,7 @@ URIs (self-contained) or written to a folder and referenced by ``<img src>``.
 """
 
 import base64
+import hashlib
 import html
 import io
 import os
@@ -390,7 +391,9 @@ a.macro {{ color: inherit; text-decoration: none; cursor: default; }}
             mime = {"bmp": "image/bmp", "wmf": "image/wmf", "png": "image/png"}.get(ext, "application/octet-stream")
             if self.images == "extract" and self.image_dir:
                 os.makedirs(self.image_dir, exist_ok=True)
-                fname = re.sub(r"[^\w.-]", "_", cache_key.lstrip("|")) + f".{ext}"
+                stem = re.sub(r"[^\w.-]", "_", cache_key.lstrip("|"))[:100]
+                digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()[:16]
+                fname = f"{stem}-{digest}.{ext}"
                 with open(os.path.join(self.image_dir, fname), "wb") as fh:
                     fh.write(data)
                 directory = os.path.basename(os.path.normpath(self.image_dir))

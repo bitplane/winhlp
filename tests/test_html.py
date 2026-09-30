@@ -2,10 +2,11 @@
 
 import os
 import re
+from types import SimpleNamespace
 
 import pytest
 from winhlp.lib.hlp import HelpFile
-from winhlp.lib.html import export_html
+from winhlp.lib.html import HtmlExporter, export_html
 from winhlp.lib.internal_files.bitmap import HotspotInfo
 from winhlp.lib.internal_files.topic import (
     BorderInfo,
@@ -67,6 +68,25 @@ def test_html_extract_writes_image_files(tmp_path):
     assert "data:image" not in out
     assert os.path.isdir(img_dir)
     assert any(f.endswith((".png", ".bmp")) for f in os.listdir(img_dir))
+
+
+def test_extracted_image_names_do_not_collide_after_sanitizing(tmp_path):
+    class ImageResource:
+        bitmaps = [SimpleNamespace(header=SimpleNamespace(width=1, height=1))]
+
+        def __init__(self, data):
+            self.data = data
+
+        def extract_image(self, index):
+            return "png", self.data
+
+    hlp = HelpFile(filepath=os.path.join(DATA, "win311/SOL.HLP"))
+    exporter = HtmlExporter(hlp, images="extract", image_dir=str(tmp_path / "images"))
+    first = exporter._image_src(ImageResource(b"first"), "a+b.bmp")
+    second = exporter._image_src(ImageResource(b"second"), "a=b.bmp")
+
+    assert first != second
+    assert len(list((tmp_path / "images").iterdir())) == 2
 
 
 def test_html_images_are_png_when_pillow_available():
