@@ -227,6 +227,14 @@ class HelpFile(BaseModel):
         self.topic = self._parse_topic()
         self.context = self._parse_context()
         self.tomap = self._parse_tomap()
+        if self.topic and self.tomap:
+            # HC30 TOPICHEADER records do not store their topic number. TOMAP
+            # maps each number to the header's TOPICPOS (topic_offset here).
+            numbers_by_position = {
+                position: number for number, position in self.tomap.topic_map.items() if number >= 16 and position
+            }
+            for topic in self.topic.get_all_topics():
+                topic.topic_number = numbers_by_position.get(topic.topic_offset)
         self.ctxomap = self._parse_ctxomap()
         self.catalog = self._parse_catalog()
         self.viola = self._parse_viola()
@@ -402,9 +410,12 @@ class HelpFile(BaseModel):
                         topic.keywords.append(kw)
 
         # 3. Browse chains: resolve browse-back/forward offsets to topic numbers.
+        before31 = bool(self.system and self.system.header and self.system.header.minor < 16)
+        by_number = {topic.topic_number: topic for topic in located if topic.topic_number is not None}
         for topic in located:
-            back = topic_for_offset(topic.browse_back) if topic.browse_back not in (None, -1) else None
-            forward = topic_for_offset(topic.browse_forward) if topic.browse_forward not in (None, -1) else None
+            lookup = by_number.get if before31 else topic_for_offset
+            back = lookup(topic.browse_back) if topic.browse_back not in (None, -1, 0xFFFF) else None
+            forward = lookup(topic.browse_forward) if topic.browse_forward not in (None, -1, 0xFFFF) else None
             if back is not None and back is not topic:
                 topic.browse_prev_topic = back.topic_number
             if forward is not None and forward is not topic:

@@ -50,12 +50,8 @@ class ToMapFile(InternalFile):
         - Index directly with topic number (don't subtract 16)
         - TopicPos[0] points to INDEX topic
         """
-        if len(self.raw_data) < 9:  # Need at least file header
-            return
-
-        # Skip the file header (9 bytes: reserved_space + used_space + file_flags)
-        data_start = 9
-        topic_data = self.raw_data[data_start:]
+        # HelpFile has already removed the nine-byte internal FILEHEADER.
+        topic_data = self.raw_data
 
         # Calculate number of topic positions (each is 4 bytes)
         num_positions = len(topic_data) // 4
@@ -73,9 +69,8 @@ class ToMapFile(InternalFile):
             self.topic_positions.append(topic_position)
 
             # Build mapping: topic_number -> topic_position
-            # Topic numbers start at 16 for first topic, but array is 0-indexed
-            topic_number = i + 16
-            self.topic_map[topic_number] = topic_position
+            # The array is indexed by topic number; entries 1..15 are reserved.
+            self.topic_map[i] = topic_position
 
     def get_topic_position(self, topic_number: int) -> Optional[int]:
         """

@@ -37,6 +37,17 @@ def test_unknown_context_hash_links_remain_unresolved():
         assert not target.navigable
 
 
+def test_win30_tomap_resolves_topic_links_and_browse_numbers():
+    helpfile = HelpFile(filepath=os.path.join(DATA, "FXSEARCH.HLP"))
+    document = helpfile.get_document()
+
+    assert helpfile.tomap.get_index_topic_position() == 12
+    assert helpfile.tomap.get_topic_position(17) == 2178
+    assert document.topic_by_number(17) is document.topics[1]
+    assert document.resolve_target("topic:TOPIC17").topic is document.topics[1]
+    assert document.browse_next(document.topics[1]) is document.topics[2]
+
+
 def test_full_text_search_is_case_insensitive_and_uses_all_terms():
     document = HelpFile(filepath=os.path.join(DATA, "SMARTTOP.HLP")).get_document()
 
