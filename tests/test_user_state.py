@@ -3,6 +3,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from winhlp.lib.user_state import UserState
 
 
@@ -49,3 +51,17 @@ def test_invalid_or_oversized_user_state_is_ignored_with_diagnostic(tmp_path):
     sidecar.write_bytes(b" " * 1_000_001)
     oversized = UserState.for_help_file(help_path)
     assert "1 MB" in oversized.diagnostic
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [[], {"version": 1, "bookmarks": {}}, {"version": 1, "bookmarks": [None]}, {"version": 1, "notes": []}],
+)
+def test_wrong_shaped_user_state_is_ignored_with_diagnostic(tmp_path, payload):
+    help_path = tmp_path / "manual.hlp"
+    (tmp_path / "manual.hlp.user.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    state = UserState.for_help_file(help_path)
+
+    assert state.diagnostic
+    assert not state.bookmarks and not state.notes

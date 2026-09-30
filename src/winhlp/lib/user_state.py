@@ -35,15 +35,23 @@ class UserState:
             if path.stat().st_size > 1_000_000:
                 raise ValueError("sidecar exceeds 1 MB")
             payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("sidecar root must be an object")
             if payload.get("version") != 1:
                 raise ValueError("unsupported sidecar version")
-            for item in payload.get("bookmarks", ()):
+            bookmarks = payload.get("bookmarks", ())
+            notes = payload.get("notes", {})
+            if not isinstance(bookmarks, list | tuple) or not all(isinstance(item, dict) for item in bookmarks):
+                raise ValueError("bookmarks must be a list of objects")
+            if not isinstance(notes, dict):
+                raise ValueError("notes must be an object")
+            for item in bookmarks:
                 offset = int(item["topic_offset"])
                 if offset >= 0:
                     state.bookmarks[offset] = Bookmark(
                         offset, str(item.get("title", "")), str(item.get("context_name", ""))
                     )
-            for key, value in payload.get("notes", {}).items():
+            for key, value in notes.items():
                 offset = int(key)
                 text = str(value)
                 if offset >= 0 and text:
